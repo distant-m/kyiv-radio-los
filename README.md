@@ -9,7 +9,15 @@ For a set of radio points (handhelds, base stations) it answers:
 
 The results come as CSV tables, a KML file (Google Earth, OsmAnd, phone map apps), GeoJSON (QGIS), and an HTML map you can open in any browser.
 
-## Quick start
+## Use it online (nothing to install)
+
+**https://distant-m.github.io/kyiv-radio-los/**
+
+Open the link on a computer or phone. The page downloads the Kyiv model once (about 11 MB) and does every calculation inside your browser: no server, and your points never leave your device. It needs a recent browser (Chrome/Edge, Firefox 113+, Safari 16.4+).
+
+The online version (`docs/`) uses the same models as the Python version. On the test set its link margins agree within 0.5 dB for 90% of links, with the same link status and line-of-sight results, and the same top repeater sites.
+
+## Quick start: run it on your own computer
 
 The repo already contains a ready-made Kyiv model (terrain + buildings, `model/`, 16 MB), so **no data preparation is needed**.
 
@@ -43,6 +51,7 @@ Points and settings are remembered in the browser. The app runs only on your com
 | 2 | `build_surface.py` | Merges **Copernicus GLO-30** terrain with the OSM buildings into a 10 m surface model. |
 | 3 | `radio_los.py` | Runs the point-to-point analysis and the repeater search (command line). |
 | 4 | `app.py` + `static/index.html` | The local map app built on the same analysis. |
+| 5 | `export_web.py` + `docs/` | The online version: the model exported to compact files, plus a JavaScript port of the engine (`docs/engine.js`) that runs in a Web Worker. |
 
 ### Building heights
 
@@ -71,7 +80,7 @@ Treat the results as planning guidance and confirm the best candidates with a fi
 
 ## Rebuilding the model (optional)
 
-Only needed for a different area or fresher OSM data. A model you build goes to `out/` and is used instead of the shipped `model/`.
+Only needed for a different area or fresher OSM data. A model you build goes to `out/` and is used instead of the shipped `model/`. To update the online version as well, run `python3 export_web.py` afterwards and commit `docs/data/`.
 
 ### Data you need (not in the repo)
 

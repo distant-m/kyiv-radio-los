@@ -363,7 +363,7 @@ async function openProfile(an, bn, rep) {
   if (!rep) a = { name: a.name, lat: a.lat, lon: a.lon, h: a.h, roof: a.roof };
   try {
     const pr = await api('/api/profile', { a, b: { name: b.name, lat: b.lat, lon: b.lon, h: b.h, roof: b.roof }, params: result ? result.prm : params() });
-    $('profile').classList.add('on'); map.invalidateSize(); drawProfile(pr);
+    $('profile').classList.add('on'); map.invalidateSize(); lastProfile = pr; drawProfile(pr);
   } catch (e) { $('rerr').textContent = e.message; }
 }
 function closeProfile() { $('profile').classList.remove('on'); map.invalidateSize(); }
@@ -389,7 +389,8 @@ function drawProfile(pr) {
   c.font = '11px -apple-system,sans-serif'; c.fillStyle = '#6b7480';
   c.fillText('brown = ground · grey = buildings · blue dashed = 1st Fresnel zone', W - 360, 18);
 }
-window.addEventListener('resize', () => { if ($('profile').classList.contains('on')) $('pclose').click(); });
+let lastProfile = null;
+window.addEventListener('resize', () => { if (lastProfile && $('profile').classList.contains('on')) drawProfile(lastProfile); });
 
 // ---------- CSV / KML export ----------
 $('csvres').onclick = () => { if (!result) return;
