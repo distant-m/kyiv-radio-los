@@ -15,7 +15,12 @@ The results come as CSV tables, a KML file (Google Earth, OsmAnd, phone map apps
 
 Open the link on a computer or phone. The page downloads the Kyiv model once (about 11 MB) and does every calculation inside your browser: no server, and your points never leave your device. It needs a recent browser (Chrome/Edge, Firefox 113+, Safari 16.4+).
 
-The online version also has a **visibility map** (like HeyWhatsThat's "visibility cloak", but including buildings). Press 👁 on a point or a repeater candidate, and everything it can see directly within the chosen radius (up to 30 km) is shaded red, for a target antenna at a height you choose above the ground or roof.
+The online version also has a **visibility map** (like HeyWhatsThat's "visibility cloak", but including buildings). Press 👁 on a point or repeater candidate, or choose **All points**. Each point's direct line of sight within the chosen radius (up to 30 km) is shaded, for a target antenna at a height you choose above the ground or roof. Two display modes:
+
+- **Separate colours:** one colour per point; switch points on and off in the legend.
+- **Overlap count:** colour shows how many points see each spot, and **green = seen by all**. Set the target height to your planned repeater antenna height, and green marks where a repeater would have direct line of sight to every point.
+
+A square is coloured only if all of it is visible. Checked against the per-link line-of-sight calculation: 96–99% agreement per point, and every sampled "seen by all" square was confirmed.
 
 The online version (`docs/`) uses the same models as the Python version. On the test set its link margins agree within 0.5 dB for 90% of links, with the same link status and line-of-sight results, and the same top repeater sites.
 

@@ -283,55 +283,84 @@ function elevation(M, lat, lon) {
   return { inside: true, ground: r1(g), surface: r1(s), building: s - g > 1 ? r1(s - g) : 0, height_tagged: !!M.tagged(x, y) };
 }
 
-/* ---------- viewshed ("visibility cloak") ----------
- * Rays from the observer to every edge cell of a lat/lon grid (cell ~cellM metres).
- * Along each ray the terrain+buildings surface is sampled every STEP_V metres; a cell is visible
- * when a target standing `targetH` metres above the surface there (ground or roof) is above
- * the highest elevation angle met so far. 4/3 earth curvature included.
- * Returns a mask: 0 = outside radius/model, 1 = not visible, 2 = visible.
+/* ---------- viewshed ("visibility cloak"), one or many observers ----------
+ * All observers share one lat/lon grid (cell ~cellM metres). From each observer, rays go to every
+ * edge cell of its own square; along a ray the terrain+buildings surface is sampled every 5 m.
+ * A cell counts as visible when a target standing `targetH` metres above the surface there
+ * (ground or roof) is above the highest elevation angle met so far. 4/3 earth curvature.
+ * Rays are straight in lat/lon; their UTM positions come from the exact projection every 200 m
+ * (linear in between), so cell position and sampled terrain agree to well under a metre.
+ * Result: bits[i] has bit k set if observer k sees ALL of cell i (every sample in it); cov[i] bit k if cell i is inside
+ * observer k's radius and inside the model.
  */
-function viewshed(M, body) {
-  const P = params(body.params);
+const mLatAt = lat => 111132.92 - 559.82 * Math.cos(2 * lat * Math.PI / 180);
+const mLonAt = lat => 111412.84 * Math.cos(lat * Math.PI / 180);
+
+function viewshed(M, body, onProgress) {
+  const raw = body.points || (body.point ? [body.point] : []);
+  if (!raw.length) throw new Error('No point selected');
+  if (raw.length > 24) throw new Error('At most 24 points at once');
   const radius = Math.min(Math.max(+body.radius_m || 10000, 500), 30000);
-  const targetH = Math.min(Math.max(+body.target_h || 1.5, 0), 300);
-  const cellM = Math.min(Math.max(+body.cell_m || 20, 10), 100);
-  const [o] = placePoints(M, [body.point]);
-  const lat0 = o.lat, lon0 = o.lon;
-  const mLat = 111132.92 - 559.82 * Math.cos(2 * lat0 * Math.PI / 180);
-  const mLon = 111412.84 * Math.cos(lat0 * Math.PI / 180);
-  const dLat = cellM / mLat, dLon = cellM / mLon;
-  const half = Math.ceil(radius / cellM), N = 2 * half + 1;
-  // local affine (east/north metres -> UTM) around the observer
-  const [ex, ey] = M.toXY(lon0 + 0.01, lat0), [nx, ny] = M.toXY(lon0, lat0 + 0.01);
-  const jEx = (ex - o.x) / (0.01 * mLon), jEy = (ey - o.y) / (0.01 * mLon);
-  const jNx = (nx - o.x) / (0.01 * mLat), jNy = (ny - o.y) / (0.01 * mLat);
-  const mask = new Uint8Array(N * N);
-  const STEP_V = 5;
-  const edge = [];
-  for (let k = 0; k < N; k++) edge.push([0, k], [N - 1, k], [k, 0], [k, N - 1]);
-  for (const [er, ec] of edge) {
-    const de = (ec - half) * cellM, dn = (half - er) * cellM;   // east/north metres to the edge cell
-    const len = Math.hypot(de, dn), ue = de / len, un = dn / len;
-    let maxSlope = -Infinity;
-    for (let d = STEP_V; d <= Math.min(len, radius); d += STEP_V) {
-      const e = ue * d, n = un * d;
-      const x = o.x + jEx * e + jNx * n, y = o.y + jEy * e + jNy * n;
-      if (!M.inside(x, y)) break;
-      const r = Math.round(half - n / cellM), c = Math.round(half + e / cellM);
-      const drop = d * d / (2 * R_EFF);
-      const s = M.surf(x, y) - drop;
-      const tSlope = (s + targetH - o.z) / d;
-      const i = r * N + c;
-      if (tSlope >= maxSlope) mask[i] = 2; else if (mask[i] === 0) mask[i] = 1;
-      if (d > 10) { const sl = (s - o.z) / d; if (sl > maxSlope) maxSlope = sl; }
-    }
+  const targetH = Math.min(Math.max(+body.target_h || 0, 0), 300);
+  const obs = placePoints(M, raw);
+  // common grid
+  let south = Infinity, north = -Infinity, west = Infinity, east = -Infinity;
+  for (const o of obs) {
+    const dla = radius / mLatAt(o.lat), dlo = radius / mLonAt(o.lat + Math.sign(o.lat) * dla);
+    south = Math.min(south, o.lat - dla); north = Math.max(north, o.lat + dla);
+    west = Math.min(west, o.lon - dlo); east = Math.max(east, o.lon + dlo);
   }
-  let vis = 0, tot = 0;
-  for (let i = 0; i < mask.length; i++) { if (mask[i]) tot++; if (mask[i] === 2) vis++; }
-  return { mask, N, south: lat0 - (half + 0.5) * dLat, north: lat0 + (half + 0.5) * dLat,
-    west: lon0 - (half + 0.5) * dLon, east: lon0 + (half + 0.5) * dLon,
-    radius_m: radius, target_h: targetH, cell_m: cellM, observer: { name: o.name, lat: o.lat, lon: o.lon, antenna_asl: r1(o.z) },
-    visible_km2: r1(vis * cellM * cellM / 1e6), share: tot ? Math.round(vis / tot * 1000) / 10 : 0 };
+  const latc = (south + north) / 2;
+  const extent = Math.max((north - south) * mLatAt(latc), (east - west) * mLonAt(latc));
+  const cellM = Math.max(+body.cell_m || 0, 10, Math.ceil(extent / 2200));
+  const dLat = cellM / mLatAt(latc), dLon = cellM / mLonAt(latc);
+  const H = Math.ceil((north - south) / dLat), W = Math.ceil((east - west) / dLon);
+  north = south + H * dLat; east = west + W * dLon;
+  const bits = new Uint32Array(W * H), cov = new Uint32Array(W * H), blk = new Uint32Array(W * H);
+  const STEP_V = cellM <= 20 ? 5 : 10, KNOT = 200;   // 10 m = model resolution; finer only for small areas
+  const stats = obs.map(() => ({ vis: 0, tot: 0 }));
+
+  obs.forEach((o, k) => {
+    const bit = 1 << k;
+    const r0 = Math.floor((north - o.lat) / dLat), c0 = Math.floor((o.lon - west) / dLon);
+    const hr = Math.ceil(radius / cellM) + 1;
+    const edge = [];
+    for (let t = -hr; t <= hr; t++) edge.push([r0 - hr, c0 + t], [r0 + hr, c0 + t], [r0 + t, c0 - hr], [r0 + t, c0 + hr]);
+    for (const [er, ec] of edge) {
+      const tlat = north - (er + 0.5) * dLat, tlon = west + (ec + 0.5) * dLon;
+      const [tx, ty] = M.toXY(tlon, tlat);
+      const len = Math.hypot(tx - o.x, ty - o.y);
+      const nK = Math.max(Math.ceil(len / KNOT), 1);
+      // exact UTM at knots along the lat/lon-straight ray
+      const kx = new Float64Array(nK + 1), ky = new Float64Array(nK + 1);
+      for (let j = 0; j <= nK; j++) { const f = j / nK; const [x, y] = M.toXY(o.lon + (tlon - o.lon) * f, o.lat + (tlat - o.lat) * f); kx[j] = x; ky[j] = y; }
+      let maxSlope = -Infinity;
+      for (let d = STEP_V; d <= Math.min(len, radius); d += STEP_V) {
+        const f = d / len, u = f * nK, j = Math.min(Math.floor(u), nK - 1), g = u - j;
+        const x = kx[j] + (kx[j + 1] - kx[j]) * g, y = ky[j] + (ky[j + 1] - ky[j]) * g;
+        if (!M.inside(x, y)) break;
+        const dist = Math.hypot(x - o.x, y - o.y);
+        if (dist > radius) break;
+        const r = Math.floor((north - (o.lat + (tlat - o.lat) * f)) / dLat), c = Math.floor((o.lon + (tlon - o.lon) * f - west) / dLon);
+        if (r < 0 || r >= H || c < 0 || c >= W) break;
+        const s = M.surf(x, y) - dist * dist / (2 * R_EFF);
+        const i = r * W + c;
+        if (!(cov[i] & bit)) { cov[i] |= bit; stats[k].tot++; }
+        if ((s + targetH - o.z) / dist >= maxSlope) bits[i] |= bit; else blk[i] |= bit;
+        if (dist > 10) { const sl = (s - o.z) / dist; if (sl > maxSlope) maxSlope = sl; }
+      }
+    }
+    if (onProgress) onProgress((k + 1) / obs.length);
+  });
+  // strict rule: a square counts as visible only if every sample in it was visible
+  for (let i = 0; i < bits.length; i++) if (bits[i]) {
+    bits[i] &= ~blk[i];
+    for (let b = bits[i], k = 0; b; b >>>= 1, k++) if (b & 1) stats[k].vis++;
+  }
+  const a = cellM * cellM / 1e6;
+  return { bits, cov, W, H, south, north, west, east, cell_m: cellM, radius_m: radius, target_h: targetH,
+    observers: obs.map((o, k) => ({ name: o.name, lat: o.lat, lon: o.lon, antenna_asl: r1(o.z),
+      visible_km2: r1(stats[k].vis * a), share: stats[k].tot ? Math.round(stats[k].vis / stats[k].tot * 1000) / 10 : 0 })) };
 }
 
 /* ---------- data loading ---------- */
@@ -381,7 +410,10 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
       else if (type === 'analyze') reply(true, analyze(M, body, p => self.postMessage({ type: 'progress', what: 'repeaters', p })));
       else if (type === 'profile') reply(true, profile(M, body));
       else if (type === 'elevation') reply(true, elevation(M, +body.lat, +body.lon));
-      else if (type === 'viewshed') { const v = viewshed(M, body); self.postMessage({ id, ok: true, data: v }, [v.mask.buffer]); }
+      else if (type === 'viewshed') {
+        const v = viewshed(M, body, p => self.postMessage({ type: 'progress', what: 'viewshed', p }));
+        self.postMessage({ id, ok: true, data: v }, [v.bits.buffer, v.cov.buffer]);
+      }
       else throw new Error('unknown request ' + type);
     } catch (e) { reply(false, e.message || String(e)); }
   };

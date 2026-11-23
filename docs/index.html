@@ -61,6 +61,10 @@
   .busy { position:fixed; inset:0; background:#fff6; display:none; align-items:center; justify-content:center; font-size:15px; z-index:2000; }
   .busy.on { display:flex; }
   .vs-img { image-rendering: pixelated; }
+  #vslegend table td { padding:2px 4px; }
+  .sw { display:inline-block; width:14px; height:14px; border-radius:3px; vertical-align:-2px; }
+  .scale { display:flex; gap:2px; align-items:center; margin-top:6px; font-size:11px; color:var(--muted); }
+  .scale span.sw { width:22px; }
   .busy .box { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 2px 12px #0003; min-width:260px; text-align:center; }
   .bar { height:6px; background:#e3e6ea; border-radius:3px; margin-top:10px; overflow:hidden; }
   .bar div { height:100%; width:0; background:var(--accent); transition:width .2s; }
@@ -113,12 +117,14 @@
 
     <section>
       <h2>Visibility map</h2>
-      <div class="hint" style="margin:0 0 6px">Shades everything a point can see directly (terrain + buildings), like HeyWhatsThat. Tip: press <b>👁</b> on a point or a repeater candidate.</div>
+      <div class="hint" style="margin:0 0 6px">Shades what your points can see directly (terrain + buildings), like HeyWhatsThat. Press <b>👁</b> on a single point or repeater candidate, or choose <b>All points</b> here.</div>
       <label>From <select id="vsfrom" style="max-width:190px"></select></label>
+      <label>Show <select id="vsmode"><option value="sep">Separate colours</option><option value="count">Overlap count</option></select></label>
       <label>Radius <span class="row"><input type="number" id="vsrad" step="1" min="1" max="30"><span class="u">km</span></span></label>
       <label>Target antenna above ground / roof <span class="row"><input type="number" id="vsth" step="0.5" min="0" max="300"><span class="u">m</span></span></label>
       <div class="tools"><button id="vsrun" style="flex:1">Show visibility</button><button id="vshide">Hide</button></div>
       <div id="vsinfo" class="hint"></div>
+      <div id="vslegend"></div>
       <div id="vserr" class="err"></div>
     </section>
 
@@ -245,7 +251,8 @@ function changed(keepResults) {
 
 function renderFromSelect() {
   const sel = $('vsfrom'), cur = sel.value;
-  sel.innerHTML = points.map(p => `<option value="p:${esc(p.name)}">${esc(p.name)}</option>`).join('') || '<option value="">(add a point first)</option>';
+  sel.innerHTML = (points.length > 1 ? '<option value="all">All points</option>' : '') +
+    (points.map(p => `<option value="p:${esc(p.name)}">${esc(p.name)}</option>`).join('') || '<option value="">(add a point first)</option>');
   if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 function renderList() {
@@ -318,9 +325,9 @@ $('file').onchange = async e => {
 };
 
 // ---------- settings ----------
-const settingIds = ['freq','txw','sens','gain','losses','defh','rep','rtxw','rgain','rmast','minroof','pad','vsrad','vsth'];
+const settingIds = ['freq','txw','sens','gain','losses','defh','rep','rtxw','rgain','rmast','minroof','pad','vsrad','vsth','vsmode'];
 function saveSettings() { const s = {}; settingIds.forEach(id => s[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value); store.set('rlos_settings', s); }
-settingIds.forEach(id => $(id).addEventListener('change', () => { saveSettings(); if (!['defh','vsrad','vsth'].includes(id)) clearResults(); }));
+settingIds.forEach(id => $(id).addEventListener('change', () => { saveSettings(); if (!['defh','vsrad','vsth','vsmode'].includes(id)) clearResults(); }));
 
 function params() {
   const n = id => { const v = parseFloat($(id).value); if (!isFinite(v)) throw new Error('Check the value of: ' + $(id).closest('label').firstChild.textContent.trim()); return v; };
@@ -408,39 +415,92 @@ function showRepeater(r) {
 
 // ---------- visibility map ----------
 const vsLayer = L.layerGroup().addTo(map);
-let vsBusy = false;
+const PALETTE = ['#e41a1c','#377eb8','#4daf4a','#984ea3','#ff7f00','#a65628','#f781bf','#17becf','#bcbd22','#555555','#1b9e77','#d95f02',
+                 '#7570b3','#e7298a','#66a61e','#e6ab02','#a6761d','#1f78b4','#33a02c','#fb9a99','#fdbf6f','#cab2d6','#b15928','#8dd3c7'];
+const ALL_COLOR = '#00a651';
+let vsBusy = false, lastVS = null, vsOn = [];
+const hex = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const countColor = (k, n) => { // 1..n-1: yellow -> red; n: green
+  if (k >= n) return hex(ALL_COLOR);
+  const t = n <= 2 ? 0 : (k - 1) / (n - 2), a = [255, 224, 102], b = [215, 48, 39];
+  return a.map((v, i) => Math.round(v + (b[i] - v) * t));
+};
+
 async function runViewshed(src) {
   $('vserr').textContent = '';
-  if (!src) {
+  let list;
+  if (src) list = [src];
+  else if ($('vsfrom').value === 'all') list = points.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof }));
+  else {
     const name = ($('vsfrom').value || '').slice(2), p = points.find(q => q.name === name);
     if (!p) { $('vserr').textContent = 'Add a point first, then choose it here.'; return; }
-    src = { name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof };
+    list = [{ name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof }];
   }
+  if (list.length > 24) { $('vserr').textContent = 'At most 24 points at once.'; return; }
   const radius = Math.min(Math.max(parseFloat($('vsrad').value) || 10, 1), 30) * 1000;
   const th = Math.min(Math.max(parseFloat($('vsth').value) || 0, 0), 300);
-  if (vsBusy) return; vsBusy = true; busy(true, `Calculating what ${src.name} can see…`);
+  if (vsBusy) return; vsBusy = true;
+  busy(true, list.length > 1 ? `Calculating what ${list.length} points can see…` : `Calculating what ${list[0].name} can see…`);
   try {
-    const v = await api('/api/viewshed', { point: src, radius_m: radius, target_h: th, cell_m: Math.max(10, Math.round(radius / 500)), params: {} });
-    drawViewshed(v, src);
+    lastVS = await api('/api/viewshed', { points: list, radius_m: radius, target_h: th });
+    vsOn = lastVS.observers.map(() => true);
+    renderViewshed(true);
   } catch (e) { $('vserr').textContent = e.message; }
   finally { vsBusy = false; busy(false); }
 }
-function drawViewshed(v, src) {
+
+function renderViewshed(fit) {
+  const v = lastVS; if (!v) return;
   vsLayer.clearLayers();
-  const cv = document.createElement('canvas'); cv.width = v.N; cv.height = v.N;
-  const ctx = cv.getContext('2d'), img = ctx.createImageData(v.N, v.N), px = img.data;
-  for (let i = 0; i < v.mask.length; i++) if (v.mask[i] === 2) { px[i * 4] = 210; px[i * 4 + 1] = 25; px[i * 4 + 2] = 60; px[i * 4 + 3] = 140; }
+  const n = v.observers.length, mode = n > 1 ? $('vsmode').value : 'sep';
+  const on = vsOn.reduce((m, x, k) => x ? m | (1 << k) : m, 0) >>> 0, nOn = vsOn.filter(Boolean).length;
+  const cols = v.observers.map((_, k) => hex(PALETTE[k % PALETTE.length]));
+  const cv = document.createElement('canvas'); cv.width = v.W; cv.height = v.H;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(v.W, v.H), px = img.data;
+  const area = new Array(n + 1).fill(0);
+  for (let i = 0; i < v.bits.length; i++) {
+    const b = (v.bits[i] & on) >>> 0; if (!b) continue;
+    let cnt = 0, r = 0, g = 0, bl = 0;
+    for (let x = b, k = 0; x; x >>>= 1, k++) if (x & 1) { cnt++; r += cols[k][0]; g += cols[k][1]; bl += cols[k][2]; }
+    area[cnt]++;
+    const o = i * 4;
+    if (mode === 'count') { const c = countColor(cnt, nOn); px[o] = c[0]; px[o + 1] = c[1]; px[o + 2] = c[2]; px[o + 3] = cnt >= nOn ? 200 : 150; }
+    else { px[o] = r / cnt; px[o + 1] = g / cnt; px[o + 2] = bl / cnt; px[o + 3] = cnt > 1 ? 165 : 130; }
+  }
   ctx.putImageData(img, 0, 0);
-  L.imageOverlay(cv.toDataURL(), [[v.south, v.west], [v.north, v.east]], { opacity: 1, interactive: false, className: 'vs-img' }).addTo(vsLayer);
-  L.circle([v.observer.lat, v.observer.lon], { radius: v.radius_m, color: '#d2193c', weight: 1, fill: false, dashArray: '3 5', interactive: false }).addTo(vsLayer);
-  L.circleMarker([v.observer.lat, v.observer.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#d2193c', fillOpacity: 1 })
-    .bindTooltip(`${esc(v.observer.name)}: antenna at ${v.observer.antenna_asl} m ASL`).addTo(vsLayer);
-  $('vsinfo').innerHTML = `<b>${esc(v.observer.name)}</b> sees <b>${v.visible_km2} km²</b> (${v.share}% of the ${v.radius_m / 1000} km circle) at a target height of ${v.target_h} m. ` +
-    `Red = direct line of sight, each ${v.cell_m} m square visible at least in part. Radio can still work outside red (reflections, diffraction): use <b>Analyze</b> for link margins.`;
-  map.fitBounds([[v.south, v.west], [v.north, v.east]]);
+  cv.toBlob(blob => {
+    if (lastVS !== v) return;
+    L.imageOverlay(URL.createObjectURL(blob), [[v.south, v.west], [v.north, v.east]], { interactive: false, className: 'vs-img' }).addTo(vsLayer).bringToBack();
+  });
+  v.observers.forEach((o, k) => {
+    if (!vsOn[k]) return;
+    const c = mode === 'count' ? '#333' : PALETTE[k % PALETTE.length];
+    L.circle([o.lat, o.lon], { radius: v.radius_m, color: c, weight: 1, fill: false, dashArray: '3 5', interactive: false }).addTo(vsLayer);
+    L.circleMarker([o.lat, o.lon], { radius: 6, color: '#fff', weight: 2, fillColor: c, fillOpacity: 1 })
+      .bindTooltip(`${esc(o.name)}: antenna at ${o.antenna_asl} m ASL, sees ${o.visible_km2} km²`).addTo(vsLayer);
+  });
+  const km2 = c => (c * v.cell_m * v.cell_m / 1e6).toFixed(1);
+  const rows = v.observers.map((o, k) => `<tr><td><input type="checkbox" data-vk="${k}" ${vsOn[k] ? 'checked' : ''}></td>
+    <td>${mode === 'sep' ? `<span class="sw" style="background:${PALETTE[k % PALETTE.length]}"></span>` : ''}</td><td>${esc(o.name)}</td>
+    <td class="num">${o.visible_km2} km²</td><td class="num" style="color:#6b7480">${o.share}%</td></tr>`).join('');
+  let extra = '';
+  if (mode === 'count' && nOn > 1) {
+    extra = '<div class="scale">' + Array.from({ length: nOn }, (_, k) => { const c = countColor(k + 1, nOn);
+      return `<span class="sw" title="${k + 1}" style="background:rgb(${c})"></span>`; }).join('') +
+      `<span>&nbsp;1 → ${nOn} points</span></div>` +
+      `<div class="hint"><span class="sw" style="background:${ALL_COLOR}"></span> seen by <b>all ${nOn}</b>: <b>${km2(area[nOn])} km²</b>. ` +
+      `With the target height set to your repeater antenna height, a repeater placed in green has direct line of sight to every selected point.</div>`;
+  }
+  $('vslegend').innerHTML = (n > 1 ? `<table>${rows}</table>` : '') + extra;
+  $('vsinfo').innerHTML = (n === 1 ? `<b>${esc(v.observers[0].name)}</b> sees <b>${v.observers[0].visible_km2} km²</b> (${v.observers[0].share}% of the ${v.radius_m / 1000} km circle). ` : '') +
+    `Target antenna ${v.target_h} m above ground/roof; coloured = every part of the ${v.cell_m} m square is in direct line of sight. ` +
+    `Radio can still work outside the colour (reflections, diffraction): use <b>Analyze</b> for link margins.`;
+  if (fit) map.fitBounds([[v.south, v.west], [v.north, v.east]]);
 }
+$('vslegend').addEventListener('change', e => { const k = e.target.dataset.vk; if (k === undefined) return; vsOn[+k] = e.target.checked; renderViewshed(false); });
+$('vsmode').addEventListener('change', () => renderViewshed(false));
 $('vsrun').onclick = () => runViewshed();
-$('vshide').onclick = () => { vsLayer.clearLayers(); $('vsinfo').textContent = ''; };
+$('vshide').onclick = () => { vsLayer.clearLayers(); lastVS = null; $('vsinfo').textContent = ''; $('vslegend').innerHTML = ''; };
 L.control.layers({ 'Map': osm, 'Satellite': sat }, { 'Visibility map': vsLayer, 'Links': linkLayer, 'Repeater candidates': repLayer }, { position: 'topright' }).addTo(map);
 
 // ---------- profile ----------
@@ -511,7 +571,7 @@ $('kml').onclick = () => { if (!result) return;
     bounds = info.bounds;
     L.rectangle(bounds, { color: '#1f6feb', weight: 1, fill: false, dashArray: '4 4', interactive: false }).addTo(map);
     const d = info.defaults, s = store.get('rlos_settings') || {};
-    const init = { vsrad: 10, vsth: 1.5, freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
+    const init = { vsmode: 'sep', vsrad: 10, vsth: 1.5, freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
                    rep: d.repeaters, rtxw: +dbm2w(d.rep_tx_dbm).toFixed(0), rgain: d.rep_gain, rmast: d.rep_mast, minroof: d.min_roof, pad: d.search_pad };
     settingIds.forEach(id => { const v = id in s ? s[id] : init[id]; if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = v; });
   } catch (e) { $('rerr').textContent = 'Could not load the model: ' + e.message; }
