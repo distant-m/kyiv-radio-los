@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Radio visibility planner</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --line:#e3e6ea; --text:#1d2329; --muted:#6b7480; --accent:#1f6feb;
+          --good:#1a9850; --marg:#e6b800; --weak:#f46d43; --none:#a50026; --rep:#6a3d9a; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; color:var(--text); background:var(--bg); }
+  #app { display:grid; grid-template-columns:380px 1fr; height:100%; }
+  #side { overflow-y:auto; background:var(--panel); border-right:1px solid var(--line); }
+  #main { display:grid; grid-template-rows:1fr auto; min-width:0; }
+  #map { min-height:0; }
+  section { padding:12px 14px; border-bottom:1px solid var(--line); }
+  h1 { font-size:15px; margin:0; } h2 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 8px; }
+  .sub { color:var(--muted); font-size:12px; margin-top:2px; }
+  label { display:flex; align-items:center; justify-content:space-between; gap:8px; margin:5px 0; }
+  label span.u { color:var(--muted); font-size:11px; width:34px; }
+  input[type=number], input[type=text], select { font:inherit; padding:4px 6px; border:1px solid #cfd4da; border-radius:5px; background:#fff; }
+  input[type=number] { width:80px; text-align:right; }
+  .row { display:flex; gap:6px; align-items:center; }
+  .row input[type=text] { flex:1; min-width:0; }
+  button { font:inherit; padding:5px 10px; border:1px solid #cfd4da; border-radius:5px; background:#fff; cursor:pointer; }
+  button:hover { background:#f0f3f6; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; width:100%; padding:8px; font-size:14px; }
+  button.primary:disabled { opacity:.6; cursor:wait; }
+  button.x { border:none; background:none; color:var(--muted); padding:2px 5px; font-size:15px; }
+  button.x:hover { color:var(--none); }
+  .hint { color:var(--muted); font-size:12px; margin:6px 0 0; }
+  .err { color:var(--none); font-size:12px; margin-top:6px; white-space:pre-wrap; }
+  .pt { border:1px solid var(--line); border-radius:7px; padding:6px 8px; margin:6px 0; }
+  .pt.sel { border-color:var(--accent); box-shadow:0 0 0 2px #1f6feb22; }
+  .pt .top { display:flex; gap:6px; align-items:center; }
+  .pt .top input.name { flex:1; font-weight:600; }
+  .pt .mid { display:flex; gap:6px; align-items:center; margin-top:5px; }
+  .pt .mid input.h { width:58px; }
+  .pt .info { color:var(--muted); font-size:11px; margin-top:3px; }
+  .dot { width:22px; height:22px; border-radius:50%; background:#2b83ba; color:#fff; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; flex:none; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th { text-align:left; color:var(--muted); font-weight:500; padding:3px 4px; border-bottom:1px solid var(--line); }
+  td { padding:4px; border-bottom:1px solid #f0f2f4; }
+  tr.click { cursor:pointer; } tr.click:hover td { background:#f4f7fb; } tr.active td { background:#e8f0fe; }
+  .st { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; vertical-align:-1px; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .tools { display:flex; gap:6px; flex-wrap:wrap; }
+  #profile { background:var(--panel); border-top:1px solid var(--line); height:230px; display:none; position:relative; }
+  #profile.on { display:block; }
+  #profile canvas { width:100%; height:100%; display:block; }
+  #profile .close { position:absolute; top:6px; right:8px; }
+  .legend { background:#fff; padding:6px 9px; border-radius:6px; box-shadow:0 1px 4px #0003; line-height:1.6; font-size:12px; }
+  .legend i { display:inline-block; width:18px; height:4px; margin-right:6px; vertical-align:middle; }
+  .mk { background:#2b83ba; color:#fff; border:2px solid #fff; border-radius:50%; width:26px !important; height:26px !important; margin:-13px 0 0 -13px !important;
+        display:flex; align-items:center; justify-content:center; font-weight:700; font-size:12px; box-shadow:0 1px 4px #0006; }
+  .mk.sel { background:var(--accent); outline:3px solid #1f6feb55; }
+  .rmk { background:var(--rep); color:#fff; border:2px solid #fff; border-radius:4px; width:24px !important; height:24px !important; margin:-12px 0 0 -12px !important;
+         display:flex; align-items:center; justify-content:center; font-weight:700; font-size:11px; box-shadow:0 1px 4px #0006; }
+  .busy { position:fixed; inset:0; background:#fff6; display:none; align-items:center; justify-content:center; font-size:15px; z-index:2000; }
+  .busy.on { display:flex; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <section>
+      <h1>Radio visibility planner</h1>
+      <div class="sub">Terrain (Copernicus GLO-30) + buildings (OpenStreetMap)</div>
+    </section>
+
+    <section>
+      <h2>Radio</h2>
+      <label>Frequency <span class="row"><input type="number" id="freq" step="0.0125" min="30" max="6000"><span class="u">MHz</span></span></label>
+      <label>Handheld power <span class="row"><input type="number" id="txw" step="0.5" min="0.1" max="100"><span class="u">W</span></span></label>
+      <label>Receiver sensitivity <span class="row"><input type="number" id="sens" step="1" min="-150" max="-60"><span class="u">dBm</span></span></label>
+      <label>Antenna gain <span class="row"><input type="number" id="gain" step="0.5" min="-10" max="30"><span class="u">dBi</span></span></label>
+      <label>Cable / body losses <span class="row"><input type="number" id="losses" step="0.5" min="0" max="40"><span class="u">dB</span></span></label>
+      <label>Antenna height for new points <span class="row"><input type="number" id="defh" step="0.5" min="0" max="500"><span class="u">m</span></span></label>
+    </section>
+
+    <section>
+      <h2>Points</h2>
+      <div class="row">
+        <input type="text" id="coord" placeholder="50.4501, 30.5241  or  50°27'00&quot;N 30°31'27&quot;E">
+        <button id="addc">Add</button>
+      </div>
+      <div class="hint">Or click on the map. Drag markers to move them.</div>
+      <div id="cerr" class="err"></div>
+      <div id="plist"></div>
+      <div class="tools" style="margin-top:6px">
+        <button id="savecsv">Save points (CSV)</button>
+        <button id="loadcsv">Load CSV</button>
+        <button id="clearpts">Clear all</button>
+        <input type="file" id="file" accept=".csv,text/csv" hidden>
+      </div>
+    </section>
+
+    <section>
+      <h2>Repeater search</h2>
+      <label><span><input type="checkbox" id="rep"> Find best repeater sites</span></label>
+      <label>Repeater power <span class="row"><input type="number" id="rtxw" step="1" min="0.1" max="500"><span class="u">W</span></span></label>
+      <label>Repeater antenna gain <span class="row"><input type="number" id="rgain" step="0.5" min="-10" max="30"><span class="u">dBi</span></span></label>
+      <label>Mast above roof / ground <span class="row"><input type="number" id="rmast" step="0.5" min="0" max="100"><span class="u">m</span></span></label>
+      <label>Only roofs taller than <span class="row"><input type="number" id="minroof" step="1" min="0" max="300"><span class="u">m</span></span></label>
+      <label>Search beyond points by <span class="row"><input type="number" id="pad" step="100" min="0" max="10000"><span class="u">m</span></span></label>
+    </section>
+
+    <section>
+      <button class="primary" id="run">Analyze</button>
+      <div id="rerr" class="err"></div>
+    </section>
+
+    <section id="res" hidden>
+      <h2>Links <span id="lsum" style="text-transform:none;letter-spacing:0"></span></h2>
+      <table><thead><tr><th>Link</th><th class="num">km</th><th class="num">Margin</th><th>LOS</th></tr></thead><tbody id="ltab"></tbody></table>
+      <div class="hint">Click a link for its height profile. Margin = how many dB above receiver sensitivity.</div>
+      <div id="repbox" hidden style="margin-top:12px">
+        <h2>Repeater candidates</h2>
+        <table><thead><tr><th>#</th><th>Site</th><th class="num">Served</th><th class="num">Worst</th><th></th></tr></thead><tbody id="rtab"></tbody></table>
+        <div class="hint">Click a site to see its links. Worst = weakest point's margin, dB.</div>
+      </div>
+      <div class="tools" style="margin-top:10px"><button id="kml">Export KML</button><button id="csvres">Export links CSV</button></div>
+    </section>
+  </div>
+
+  <div id="main">
+    <div id="map"></div>
+    <div id="profile"><canvas id="pc"></canvas><button class="x close" id="pclose" title="Close">✕</button></div>
+  </div>
+</div>
+<div class="busy" id="busy">Calculating…</div>
+
+<script>
+const COLORS = { "good":"#1a9850", "marginal":"#e6b800", "weak":"#f46d43", "no link":"#a50026" };
+const $ = id => document.getElementById(id);
+const dbm2w = d => Math.pow(10, (d - 30) / 10), w2dbm = w => 10 * Math.log10(w) + 30;
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const store = { get(k){ try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } },
+                set(k,v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} } };
+
+let points = [];      // {name, lat, lon, h, roof, info}
+let selected = -1;
+let result = null;
+let bounds = null;
+
+// ---------- map ----------
+const map = L.map('map', { zoomControl:true }).setView([50.45, 30.52], 11);
+const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
+const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom:19, attribution:'Imagery &copy; Esri' });
+L.control.layers({ "Map":osm, "Satellite":sat }).addTo(map);
+const linkLayer = L.layerGroup().addTo(map), repLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map);
+const legend = L.control({ position:'bottomleft' });
+legend.onAdd = () => { const d = L.DomUtil.create('div','legend');
+  d.innerHTML = Object.entries(COLORS).map(([k,c]) => `<i style="background:${c}"></i>${k}`).join('<br>') + '<br><span style="color:#6b7480">dashed = no line of sight</span>'; return d; };
+legend.addTo(map);
+
+map.on('click', e => addPoint(e.latlng.lat, e.latlng.lng));
+
+// ---------- coordinates ----------
+function parseCoord(s) {
+  s = s.trim().replace(/,(?=\d{3,})/g, '.');
+  const dms = /(-?\d+(?:\.\d+)?)\s*[°º]\s*(?:(\d+(?:\.\d+)?)\s*['′’]\s*)?(?:(\d+(?:\.\d+)?)\s*(?:["″”]|'')\s*)?([NSEW]*)/gi;
+  const parts = [...s.matchAll(dms)].filter(m => m[0].includes('°') || m[0].includes('º'));
+  let vals;
+  if (parts.length >= 2) {
+    vals = parts.slice(0,2).map(m => { let v = Math.abs(+m[1]) + (+m[2]||0)/60 + (+m[3]||0)/3600;
+      if (/[SW]/i.test(m[4]) || m[1].startsWith('-')) v = -v; return { v, h:(m[4]||'').toUpperCase() }; });
+    let [a, b] = vals; if (/E|W/.test(a.h) && /N|S/.test(b.h)) [a, b] = [b, a];
+    vals = [a.v, b.v];
+  } else {
+    const nums = s.match(/-?\d+(?:\.\d+)?/g);
+    if (!nums || nums.length < 2) return null;
+    vals = [+nums[0], +nums[1]];
+  }
+  let [lat, lon] = vals;
+  if (lat > 20 && lat < 40 && lon > 40 && lon < 60) [lat, lon] = [lon, lat]; // lon,lat order typed
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return null;
+  return [lat, lon];
+}
+
+$('addc').onclick = () => {
+  const c = parseCoord($('coord').value);
+  $('cerr').textContent = c ? '' : 'Could not read these coordinates. Use e.g. 50.4501, 30.5241';
+  if (c) { addPoint(c[0], c[1]); $('coord').value = ''; map.panTo(c); }
+};
+$('coord').addEventListener('keydown', e => { if (e.key === 'Enter') $('addc').click(); });
+
+// ---------- points ----------
+function nextName() { let i = points.length + 1; while (points.some(p => p.name === 'P' + i)) i++; return 'P' + i; }
+
+function addPoint(lat, lon, extra = {}) {
+  if (bounds && !L.latLngBounds(bounds).contains([lat, lon])) {
+    $('cerr').textContent = 'This spot is outside the area of the terrain/building model (blue frame).'; return;
+  }
+  $('cerr').textContent = '';
+  points.push(Object.assign({ name: nextName(), lat: +lat.toFixed(6), lon: +lon.toFixed(6), h: +$('defh').value || 1.5, roof: false }, extra));
+  selected = points.length - 1;
+  fetchInfo(points[selected]);
+  changed();
+}
+
+async function fetchInfo(p) {
+  try {
+    const r = await api('/api/elevation', { lat: p.lat, lon: p.lon });
+    p.info = r; renderList();
+  } catch (e) {}
+}
+
+function changed(keepResults) {
+  store.set('rlos_points', points.map(({info, ...p}) => p));
+  if (!keepResults) clearResults();
+  renderList(); renderMarkers();
+}
+
+function renderList() {
+  $('plist').innerHTML = points.map((p, i) => {
+    const inf = p.info && p.info.inside ? `ground ${p.info.ground} m` + (p.info.building ? ` · building ${p.info.building} m${p.info.height_tagged ? '' : ' (est.)'}` : '') : '';
+    const res = result && result.points.find(q => q.name === p.name);
+    const asl = res ? ` · antenna at ${res.antenna_asl} m ASL` : '';
+    return `<div class="pt ${i === selected ? 'sel' : ''}" data-i="${i}">
+      <div class="top"><div class="dot">${i + 1}</div><input class="name" type="text" value="${esc(p.name)}" data-f="name">
+        <button class="x" data-del="${i}" title="Remove">✕</button></div>
+      <div class="mid"><input type="text" value="${p.lat}, ${p.lon}" data-f="ll" style="flex:1;min-width:0">
+        <input class="h" type="number" step="0.5" min="0" max="500" value="${p.h}" data-f="h" title="Antenna height, m"><span class="u" style="color:#6b7480;font-size:11px">m</span>
+        <label style="margin:0;gap:3px" title="Antenna is on the roof: height counts from the roof top"><input type="checkbox" data-f="roof" ${p.roof ? 'checked' : ''}>roof</label></div>
+      <div class="info">${inf}${asl}</div></div>`;
+  }).join('') || '<div class="hint">No points yet.</div>';
+}
+
+$('plist').addEventListener('change', e => {
+  const box = e.target.closest('.pt'); if (!box) return;
+  const p = points[+box.dataset.i], f = e.target.dataset.f;
+  if (f === 'name') { const v = e.target.value.trim() || p.name; p.name = points.some((q, j) => q !== p && q.name === v) ? p.name : v; }
+  if (f === 'h') { const v = +e.target.value; if (v >= 0 && v <= 500) p.h = v; }
+  if (f === 'roof') p.roof = e.target.checked;
+  if (f === 'll') { const c = parseCoord(e.target.value); if (c) { p.lat = +c[0].toFixed(6); p.lon = +c[1].toFixed(6); fetchInfo(p); } }
+  changed();
+});
+$('plist').addEventListener('click', e => {
+  if (e.target.dataset.del !== undefined) { points.splice(+e.target.dataset.del, 1); selected = -1; changed(); return; }
+  const box = e.target.closest('.pt'); if (!box) return;
+  selected = +box.dataset.i; renderMarkers();
+  document.querySelectorAll('.pt').forEach((el, i) => el.classList.toggle('sel', i === selected));
+  if (e.target.tagName !== 'INPUT') map.panTo([points[selected].lat, points[selected].lon]);
+});
+
+function renderMarkers() {
+  ptLayer.clearLayers();
+  points.forEach((p, i) => {
+    const m = L.marker([p.lat, p.lon], { draggable: true,
+      icon: L.divIcon({ className: 'mk' + (i === selected ? ' sel' : ''), html: String(i + 1) }) })
+      .bindTooltip(esc(p.name), { direction: 'right', offset: [12, 0] }).addTo(ptLayer);
+    m.on('dragend', ev => { const ll = ev.target.getLatLng(); p.lat = +ll.lat.toFixed(6); p.lon = +ll.lng.toFixed(6); p.info = null; fetchInfo(p); changed(); });
+    m.on('click', () => { selected = i; renderList(); renderMarkers(); });
+  });
+}
+
+$('clearpts').onclick = () => { if (points.length && confirmInline('clearpts')) { points = []; selected = -1; changed(); } };
+function confirmInline(id) { const b = $(id); if (b.dataset.armed) { delete b.dataset.armed; b.textContent = 'Clear all'; return true; }
+  b.dataset.armed = 1; b.textContent = 'Click again to clear'; setTimeout(() => { delete b.dataset.armed; b.textContent = 'Clear all'; }, 3000); return false; }
+
+// ---------- CSV ----------
+function download(name, text, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000); }
+const csvq = v => /[",\n]/.test(String(v)) ? '"' + String(v).replace(/"/g, '""') + '"' : String(v);
+$('savecsv').onclick = () => download('points.csv', 'name,lat,lon,height_m,on_roof\n' + points.map(p => [p.name, p.lat, p.lon, p.h, p.roof ? 'yes' : 'no'].map(csvq).join(',')).join('\n') + '\n', 'text/csv');
+$('loadcsv').onclick = () => $('file').click();
+$('file').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  const lines = (await f.text()).split(/\r?\n/).filter(l => l.trim());
+  const split = l => { const out = []; let cur = '', q = false; for (const ch of l) { if (ch === '"') q = !q; else if ((ch === ',' || ch === ';') && !q) { out.push(cur); cur = ''; } else cur += ch; } out.push(cur); return out.map(s => s.trim()); };
+  const head = split(lines[0]).map(s => s.toLowerCase());
+  const idx = k => head.findIndex(h => h === k || h.startsWith(k));
+  const iN = idx('name'), iLa = idx('lat'), iLo = Math.max(idx('lon'), idx('lng')), iH = idx('height'), iR = idx('on_roof');
+  if (iLa < 0 || iLo < 0) { $('cerr').textContent = 'CSV needs lat and lon columns'; return; }
+  points = lines.slice(1).map((l, k) => { const c = split(l); return { name: c[iN] || 'P' + (k + 1), lat: +c[iLa], lon: +c[iLo], h: iH >= 0 && c[iH] !== '' ? +c[iH] : +$('defh').value, roof: iR >= 0 && /^(yes|y|1|true|так)$/i.test(c[iR]) }; })
+    .filter(p => isFinite(p.lat) && isFinite(p.lon));
+  selected = -1; points.forEach(fetchInfo); changed();
+  if (points.length) map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon])).pad(0.2));
+  e.target.value = '';
+};
+
+// ---------- settings ----------
+const settingIds = ['freq','txw','sens','gain','losses','defh','rep','rtxw','rgain','rmast','minroof','pad'];
+function saveSettings() { const s = {}; settingIds.forEach(id => s[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value); store.set('rlos_settings', s); }
+settingIds.forEach(id => $(id).addEventListener('change', () => { saveSettings(); if (id !== 'defh') clearResults(); }));
+
+function params() {
+  const n = id => { const v = parseFloat($(id).value); if (!isFinite(v)) throw new Error('Check the value of: ' + $(id).closest('label').firstChild.textContent.trim()); return v; };
+  return { freq: n('freq'), tx_dbm: w2dbm(n('txw')), sens_dbm: n('sens'), gain_tx: n('gain'), gain_rx: n('gain'), losses: n('losses'),
+           repeaters: $('rep').checked, rep_tx_dbm: w2dbm(n('rtxw')), rep_gain: n('rgain'), rep_mast: n('rmast'), min_roof: n('minroof'), search_pad: n('pad') };
+}
+
+// ---------- API ----------
+async function api(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({ error: 'Bad response from server' }));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const payloadPoints = () => points.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof }));
+
+$('run').onclick = async () => {
+  $('rerr').textContent = '';
+  if (points.length < 1 || (points.length < 2 && !$('rep').checked)) { $('rerr').textContent = 'Add at least two points (or one point with repeater search on).'; return; }
+  let prm; try { prm = params(); } catch (e) { $('rerr').textContent = e.message; return; }
+  $('run').disabled = true; $('busy').classList.add('on');
+  try { result = await api('/api/analyze', { points: payloadPoints(), params: prm }); result.prm = prm; showResults(); }
+  catch (e) { $('rerr').textContent = e.message; }
+  finally { $('run').disabled = false; $('busy').classList.remove('on'); }
+};
+
+// ---------- results ----------
+function clearResults() { result = null; linkLayer.clearLayers(); repLayer.clearLayers(); $('res').hidden = true; closeProfile(); }
+
+function linkLine(a, b, status, los, opts = {}) {
+  return L.polyline([[a.lat, a.lon], [b.lat, b.lon]], Object.assign({ color: COLORS[status], weight: status === 'no link' ? 2 : 4, opacity: .9, dashArray: los ? null : '7 6' }, opts));
+}
+
+function showResults() {
+  linkLayer.clearLayers(); repLayer.clearLayers();
+  const byName = Object.fromEntries(result.points.map(p => [p.name, p]));
+  const order = { 'good': 0, 'marginal': 1, 'weak': 2, 'no link': 3 };
+  const links = [...result.links].sort((x, y) => order[x.status] - order[y.status] || y.margin - x.margin);
+  links.forEach(l => linkLine(byName[l.a], byName[l.b], l.status, l.los)
+    .bindPopup(`<b>${esc(l.a)} ↔ ${esc(l.b)}</b><br>${l.dist_km} km · <b>${l.status}</b><br>margin ${l.margin} dB (rx ${l.rx_dbm} dBm)<br>line of sight: ${l.los ? 'yes' : 'no'} · Fresnel ${l.fresnel}<br>blocked by: ${l.obstacle}${l.obstacle === 'building' ? ' (' + l.obstacle_height + ' height)' : ''}<br>model: ${l.model}`)
+    .on('click', () => openProfile(l.a, l.b)).addTo(linkLayer));
+  const cnt = s => links.filter(l => l.status === s).length;
+  $('lsum').textContent = links.length ? `— ${cnt('good')} good, ${cnt('marginal')} marginal, ${cnt('weak')} weak, ${cnt('no link')} none` : '';
+  $('ltab').innerHTML = links.map((l, k) => `<tr class="click" data-k="${k}"><td><span class="st" style="background:${COLORS[l.status]}"></span>${esc(l.a)} – ${esc(l.b)}</td>
+    <td class="num">${l.dist_km}</td><td class="num">${l.margin}</td><td>${l.los ? 'yes' : 'no'}</td></tr>`).join('');
+  $('ltab').onclick = e => { const tr = e.target.closest('tr'); if (!tr) return; const l = links[+tr.dataset.k];
+    document.querySelectorAll('#ltab tr, #rtab tr').forEach(t => t.classList.toggle('active', t === tr)); openProfile(l.a, l.b); };
+
+  $('repbox').hidden = !result.repeaters.length;
+  result.repeaters.forEach(r => L.marker([r.lat, r.lon], { icon: L.divIcon({ className: 'rmk', html: 'R' + r.rank }) })
+    .bindTooltip(`R${r.rank}: serves ${r.served}/${r.total}, worst ${r.worst} dB`).on('click', () => showRepeater(r)).addTo(repLayer));
+  $('rtab').innerHTML = result.repeaters.map((r, k) => `<tr class="click" data-k="${k}"><td>R${r.rank}</td>
+    <td>${r.type === 'rooftop' ? 'roof ' + r.building_m + ' m' : esc(r.type)}<br><span style="color:#6b7480">${r.lat}, ${r.lon}</span></td>
+    <td class="num">${r.served}/${r.total}</td><td class="num">${r.worst}</td><td><button data-add="${k}" title="Add as a point">+</button></td></tr>`).join('');
+  $('rtab').onclick = e => { const k = e.target.closest('tr')?.dataset.k; if (k === undefined) return; const r = result.repeaters[+k];
+    if (e.target.dataset.add !== undefined) { addPoint(r.lat, r.lon, { name: 'R' + r.rank, h: +$('rmast').value, roof: r.type !== 'ground mast' }); return; }
+    document.querySelectorAll('#ltab tr, #rtab tr').forEach(t => t.classList.toggle('active', t === e.target.closest('tr'))); showRepeater(r); };
+  $('res').hidden = false; renderList();
+}
+
+function statusOf(m) { return m >= 20 ? 'good' : m >= 10 ? 'marginal' : m >= 0 ? 'weak' : 'no link'; }
+function showRepeater(r) {
+  linkLayer.clearLayers();
+  result.points.forEach(p => { const m = r.margins[p.name];
+    linkLine(r, p, statusOf(m), true, { dashArray: null }).bindPopup(`<b>R${r.rank} → ${esc(p.name)}</b><br>margin ${m} dB`)
+      .on('click', () => openProfile('R' + r.rank, p.name, r)).addTo(linkLayer); });
+  map.fitBounds(L.latLngBounds([[r.lat, r.lon], ...result.points.map(p => [p.lat, p.lon])]).pad(0.15));
+  L.popup().setLatLng([r.lat, r.lon]).setContent(`<b>Repeater candidate R${r.rank}</b><br>${esc(r.type)}${r.type === 'rooftop' ? ', building ' + r.building_m + ' m' : ''}<br>site ${r.site_asl} m ASL<br>serves ${r.served}/${r.total} with ≥ 10 dB · worst ${r.worst} dB<br><span style="color:#6b7480">${r.lat}, ${r.lon}</span>`).openOn(map);
+}
+
+// ---------- profile ----------
+async function openProfile(an, bn, rep) {
+  const find = n => points.find(p => p.name === n);
+  let a = rep ? { name: an, lat: rep.lat, lon: rep.lon, h: result.prm.rep_mast, roof: rep.type !== 'ground mast' } : find(an);
+  const b = find(bn); if (!a || !b) return;
+  if (!rep) a = { name: a.name, lat: a.lat, lon: a.lon, h: a.h, roof: a.roof };
+  try {
+    const pr = await api('/api/profile', { a, b: { name: b.name, lat: b.lat, lon: b.lon, h: b.h, roof: b.roof }, params: result ? result.prm : params() });
+    $('profile').classList.add('on'); map.invalidateSize(); drawProfile(pr);
+  } catch (e) { $('rerr').textContent = e.message; }
+}
+function closeProfile() { $('profile').classList.remove('on'); map.invalidateSize(); }
+$('pclose').onclick = closeProfile;
+
+function drawProfile(pr) {
+  const cv = $('pc'), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr; const c = cv.getContext('2d'); c.scale(dpr, dpr); c.clearRect(0, 0, W, H);
+  const L0 = 52, R0 = 16, T0 = 30, B0 = 26, w = W - L0 - R0, h = H - T0 - B0;
+  const all = [...pr.surface, ...pr.f_hi, ...pr.f_lo, ...pr.ground];
+  let ymin = Math.min(...pr.ground) - 5, ymax = Math.max(...all) + 5;
+  const D = pr.d[pr.d.length - 1], X = d => L0 + d / D * w, Y = v => T0 + (1 - (v - ymin) / (ymax - ymin)) * h;
+  c.font = '11px -apple-system,sans-serif'; c.fillStyle = '#6b7480'; c.strokeStyle = '#eef0f3';
+  for (let k = 0; k <= 4; k++) { const v = ymin + (ymax - ymin) * k / 4; c.beginPath(); c.moveTo(L0, Y(v)); c.lineTo(L0 + w, Y(v)); c.stroke(); c.fillText(Math.round(v) + ' m', 4, Y(v) + 4); }
+  for (let k = 0; k <= 5; k++) { const d = D * k / 5; c.fillText((d / 1000).toFixed(1) + ' km', X(d) - 14, H - 8); }
+  const area = (arr, col) => { c.beginPath(); c.moveTo(X(0), Y(ymin)); pr.d.forEach((d, i) => c.lineTo(X(d), Y(arr[i]))); c.lineTo(X(D), Y(ymin)); c.closePath(); c.fillStyle = col; c.fill(); };
+  area(pr.surface, '#9aa3ad'); area(pr.ground, '#c8a46e');
+  const line = (arr, col, dash, lw) => { c.beginPath(); pr.d.forEach((d, i) => i ? c.lineTo(X(d), Y(arr[i])) : c.moveTo(X(d), Y(arr[i]))); c.strokeStyle = col; c.setLineDash(dash || []); c.lineWidth = lw || 1.5; c.stroke(); c.setLineDash([]); c.lineWidth = 1; };
+  line(pr.f_hi, '#1f6feb', [5, 4], 1); line(pr.f_lo, '#1f6feb', [5, 4], 1);
+  line(pr.line, pr.los ? '#1a9850' : '#a50026', null, 2);
+  c.fillStyle = '#1d2329'; c.font = '600 12px -apple-system,sans-serif';
+  c.fillText(`${pr.names[0]} → ${pr.names[1]}   ${pr.dist_km} km · ${pr.freq} MHz · line of sight: ${pr.los ? 'yes' : 'NO'} · Fresnel clearance ${pr.fresnel} (≥ 0.6 is clean)`, L0, 18);
+  c.font = '11px -apple-system,sans-serif'; c.fillStyle = '#6b7480';
+  c.fillText('brown = ground · grey = buildings · blue dashed = 1st Fresnel zone', W - 360, 18);
+}
+window.addEventListener('resize', () => { if ($('profile').classList.contains('on')) $('pclose').click(); });
+
+// ---------- CSV / KML export ----------
+$('csvres').onclick = () => { if (!result) return;
+  download('links.csv', 'from,to,distance_km,line_of_sight,fresnel_clearance,margin_dB,rx_dBm,status,blocked_by,model\n' +
+    result.links.map(l => [l.a, l.b, l.dist_km, l.los ? 'yes' : 'no', l.fresnel, l.margin, l.rx_dbm, l.status, l.obstacle, l.model].map(csvq).join(',')).join('\n') + '\n', 'text/csv'); };
+$('kml').onclick = () => { if (!result) return;
+  const kc = h => 'ff' + h.slice(5, 7) + h.slice(3, 5) + h.slice(1, 3), byName = Object.fromEntries(result.points.map(p => [p.name, p]));
+  const pm = (n, lon, lat) => `<Placemark><name>${esc(n)}</name><Point><coordinates>${lon},${lat},0</coordinates></Point></Placemark>`;
+  const k = ['<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>Radio links</name>'];
+  result.points.forEach(p => k.push(pm(p.name, p.lon, p.lat)));
+  result.repeaters.forEach(r => k.push(pm(`R${r.rank} (${r.served}/${r.total}, worst ${r.worst} dB)`, r.lon, r.lat)));
+  result.links.forEach(l => { const a = byName[l.a], b = byName[l.b];
+    k.push(`<Placemark><name>${esc(l.a)} – ${esc(l.b)}: ${l.status} (${l.margin} dB)</name><Style><LineStyle><color>${kc(COLORS[l.status])}</color><width>3</width></LineStyle></Style><LineString><coordinates>${a.lon},${a.lat},0 ${b.lon},${b.lat},0</coordinates></LineString></Placemark>`); });
+  k.push('</Document></kml>'); download('radio_links.kml', k.join(''), 'application/vnd.google-earth.kml+xml'); };
+
+// ---------- start ----------
+(async () => {
+  try {
+    const info = await (await fetch('/api/info')).json();
+    bounds = info.bounds;
+    L.rectangle(bounds, { color: '#1f6feb', weight: 1, fill: false, dashArray: '4 4', interactive: false }).addTo(map);
+    const d = info.defaults, s = store.get('rlos_settings') || {};
+    const init = { freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
+                   rep: d.repeaters, rtxw: +dbm2w(d.rep_tx_dbm).toFixed(0), rgain: d.rep_gain, rmast: d.rep_mast, minroof: d.min_roof, pad: d.search_pad };
+    settingIds.forEach(id => { const v = id in s ? s[id] : init[id]; if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = v; });
+  } catch (e) { $('rerr').textContent = 'Cannot reach the local server. Is app.py running?'; }
+  points = (store.get('rlos_points') || []).filter(p => isFinite(p.lat) && isFinite(p.lon));
+  points.forEach(fetchInfo); changed();
+  if (points.length) map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon])).pad(0.2));
+})();
+</script>
+</body>
+</html>

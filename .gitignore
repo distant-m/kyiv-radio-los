@@ -1,0 +1,9 @@
+data/
+out/
+results/
+*.obf
+*.tif
+__pycache__/
+
+# the ready-made Kyiv model is part of the repo
+!model/*.tif
