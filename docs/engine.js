@@ -61,34 +61,86 @@ const UTM = (() => {
   };
 })();
 
-/* ---------- surface model ---------- */
+/* ---------- surface model (tiled, loaded on demand) ---------- */
+const MAX_TILES = 110;   // ~2.6 MB each; tiles not needed by the current task are evicted beyond this
 class Model {
-  constructor(meta, surfaceDm, groundDm, taggedBits) {
-    Object.assign(this, { meta, S: surfaceDm, G: groundDm, T: taggedBits });
-    this.W = meta.width; this.H = meta.height; this.x0 = meta.x0; this.y0 = meta.y0; this.res = meta.res;
-    this.gf = meta.ground_factor; this.GW = meta.ground_width; this.GH = meta.ground_height; this.zone = meta.utm_zone;
-    const c = [[0, 0], [this.W, 0], [0, this.H], [this.W, this.H]].map(([cc, rr]) => this.toLL(this.x0 + cc * this.res, this.y0 - rr * this.res));
-    this.bounds = [[Math.max(c[2][1], c[3][1]), Math.max(c[0][0], c[2][0])], [Math.min(c[0][1], c[1][1]), Math.min(c[1][0], c[3][0])]];
+  constructor(meta, base) {
+    Object.assign(this, { meta, base });
+    this.W = meta.width; this.H = meta.height; this.x0 = meta.x0; this.y0 = meta.y0; this.res = meta.res; this.zone = meta.utm_zone;
+    this.TS = meta.tile; this.GF = meta.ground_factor; this.GT = meta.tile / meta.ground_factor + 2;
+    this.tiles = new Map(); this.clock = 0;
+    const c = [[0, this.H], [this.W, this.H], [this.W, 0], [0, 0]].map(([cc, rr]) => this.toLL(this.x0 + cc * this.res, this.y0 - rr * this.res));
+    this.corners = c.map(([lon, lat]) => [lat, lon]);   // SW, SE, NE, NW
+    this.bounds = [[Math.min(...c.map(p => p[1])), Math.min(...c.map(p => p[0]))], [Math.max(...c.map(p => p[1])), Math.max(...c.map(p => p[0]))]];
   }
   toXY(lon, lat) { return UTM.fwd(lon, lat, this.zone); }
   toLL(x, y) { return UTM.inv(x, y, this.zone); }
   col(x) { return (x - this.x0) / this.res; }
   row(y) { return (this.y0 - y) / this.res; }
-  inside(x, y) { const r = this.row(y), c = this.col(x); return r >= 0 && r < this.H && c >= 0 && c < this.W; }
-  idx(x, y) {
-    let r = Math.floor(this.row(y)), c = Math.floor(this.col(x));   // pixel containing the point
-    r = r < 0 ? 0 : r >= this.H ? this.H - 1 : r; c = c < 0 ? 0 : c >= this.W ? this.W - 1 : c;
-    return r * this.W + c;
+  inside(x, y) {
+    const r = Math.floor(this.row(y)), c = Math.floor(this.col(x));
+    return r >= 0 && r < this.H && c >= 0 && c < this.W && (`${Math.floor(c / this.TS)}_${Math.floor(r / this.TS)}` in this.meta.tiles);
   }
-  surf(x, y) { return this.S[this.idx(x, y)] * 0.1; }
-  tagged(x, y) { const i = this.idx(x, y); return (this.T[i >> 3] >> (i & 7)) & 1; }
-  ground(x, y) {   // bilinear on the 30 m grid (cell centres)
-    let u = this.col(x) / this.gf - 0.5, v = this.row(y) / this.gf - 0.5;
-    u = Math.min(Math.max(u, 0), this.GW - 1.001); v = Math.min(Math.max(v, 0), this.GH - 1.001);
-    const i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j, G = this.G, W = this.GW;
-    const a = G[j * W + i], b = G[j * W + i + 1], c = G[(j + 1) * W + i], d = G[(j + 1) * W + i + 1];
-    return 0.1 * ((a * (1 - fu) + b * fu) * (1 - fv) + (c * (1 - fu) + d * fu) * fv);
+  tileAt(r, c) {
+    const k = `${Math.floor(c / this.TS)}_${Math.floor(r / this.TS)}`, t = this.tiles.get(k);
+    if (!t) throw new Error('Map data for this area is not loaded (tile ' + k + ')');
+    return t;
   }
+  rc(x, y) {
+    let r = Math.floor(this.row(y)), c = Math.floor(this.col(x));
+    return [r < 0 ? 0 : r >= this.H ? this.H - 1 : r, c < 0 ? 0 : c >= this.W ? this.W - 1 : c];
+  }
+  surfRC(r, c) { return this.tileAt(r, c).S[(r % this.TS) * this.TS + (c % this.TS)] * 0.1; }
+  taggedRC(r, c) { const i = (r % this.TS) * this.TS + (c % this.TS); return (this.tileAt(r, c).T[i >> 3] >> (i & 7)) & 1; }
+  surf(x, y) { const [r, c] = this.rc(x, y); return this.surfRC(r, c); }
+  tagged(x, y) { const [r, c] = this.rc(x, y); return this.taggedRC(r, c); }
+  ground(x, y) {   // bilinear on the coarse grid; each tile carries a one-cell border
+    const [r, c] = this.rc(x, y), t = this.tileAt(r, c);
+    const lr = this.row(y) - (r - r % this.TS), lc = this.col(x) - (c - c % this.TS);
+    let u = lc / this.GF + 0.5, v = lr / this.GF + 0.5;
+    const G = t.G, n = this.GT;
+    u = Math.min(Math.max(u, 0), n - 1.001); v = Math.min(Math.max(v, 0), n - 1.001);
+    const i = Math.floor(u), j = Math.floor(v), fu = u - i, fv = v - j;
+    const a = G[j * n + i], b = G[j * n + i + 1], cc = G[(j + 1) * n + i], d = G[(j + 1) * n + i + 1];
+    return 0.1 * ((a * (1 - fu) + b * fu) * (1 - fv) + (cc * (1 - fu) + d * fu) * fv);
+  }
+  /* make sure every tile touching the UTM box [x0,y0,x1,y1] is loaded */
+  async ensure(box, onProgress) {
+    const c0 = Math.max(Math.floor(this.col(box[0]) / this.TS), 0), c1 = Math.min(Math.floor(this.col(box[2]) / this.TS), this.W / this.TS - 1);
+    const r0 = Math.max(Math.floor(this.row(box[3]) / this.TS), 0), r1 = Math.min(Math.floor(this.row(box[1]) / this.TS), this.H / this.TS - 1);
+    const need = [];
+    for (let ty = r0; ty <= r1; ty++) for (let tx = c0; tx <= c1; tx++) { const k = `${tx}_${ty}`; if (k in this.meta.tiles) need.push(k); }
+    const stamp = ++this.clock, missing = need.filter(k => !this.tiles.has(k));
+    need.forEach(k => { const t = this.tiles.get(k); if (t) t.used = stamp; });
+    if (missing.length) {
+      const total = missing.reduce((s, k) => s + this.meta.tiles[k], 0); let got = 0;
+      const queue = missing.slice();
+      const worker = async () => {
+        while (queue.length) {
+          const k = queue.shift();
+          const buf = await gunzipMaybe(await fetchBuf(this.base + `t_${k}.bin.gz`, n => { got += n; onProgress && onProgress(Math.min(got / total, 1)); }));
+          this.tiles.set(k, Object.assign(decodeTile(buf, this.TS, this.GT), { used: stamp }));
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(6, queue.length) }, worker));
+    }
+    if (this.tiles.size > MAX_TILES) {
+      const old = [...this.tiles.entries()].filter(([, t]) => t.used !== stamp).sort((p, q) => p[1].used - q[1].used);
+      for (const [k] of old) { if (this.tiles.size <= MAX_TILES) break; this.tiles.delete(k); }
+    }
+    return missing.length;
+  }
+  boxLL(list, padM) {   // UTM box around lat/lon points, padded by padM metres
+    const xy = list.map(p => this.toXY(+p.lon, +p.lat));
+    return [Math.min(...xy.map(q => q[0])) - padM, Math.min(...xy.map(q => q[1])) - padM,
+            Math.max(...xy.map(q => q[0])) + padM, Math.max(...xy.map(q => q[1])) + padM];
+  }
+}
+function decodeTile(buf, TS, GT) {
+  const nS = TS * TS, nG = GT * GT;
+  if (buf.byteLength !== 2 * nS + 2 * nG + nS / 8) throw new Error('map tile has unexpected size');
+  return { S: undelta(buf.slice(0, 2 * nS), TS, TS), G: undelta(buf.slice(2 * nS, 2 * nS + 2 * nG), GT, GT),
+           T: new Uint8Array(buf.slice(2 * nS + 2 * nG)) };
 }
 
 /* ---------- propagation ---------- */
@@ -204,7 +256,7 @@ function repeaterSearch(M, pts, P, onProgress, top = 15) {
   if (h < 3 || w < 3) return [];
   const S = new Float32Array(h * w), hb = new Float32Array(h * w);
   for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
-    const x = M.x0 + (c0 + c) * M.res, y = M.y0 - (r0 + r) * M.res, s = M.S[(r0 + r) * M.W + c0 + c] * 0.1;
+    const x = M.x0 + (c0 + c + 0.5) * M.res, y = M.y0 - (r0 + r + 0.5) * M.res, s = M.surfRC(r0 + r, c0 + c);
     S[r * w + c] = s; hb[r * w + c] = s - M.ground(x, y);
   }
   // 15x15 maximum filter (separable, edges clamped)
@@ -219,7 +271,7 @@ function repeaterSearch(M, pts, P, onProgress, top = 15) {
   for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
     const i = r * w + c;
     if (S[i] !== mx[i]) continue;
-    const gi = (r0 + r) * M.W + c0 + c, tg = (M.T[gi >> 3] >> (gi & 7)) & 1;
+    const tg = M.taggedRC(r0 + r, c0 + c);
     if ((hb[i] >= P.min_roof && tg) || hb[i] < 2) cands.push([S[i], r, c]);
   }
   cands.sort((p, q) => q[0] - p[0]);
@@ -227,7 +279,7 @@ function repeaterSearch(M, pts, P, onProgress, top = 15) {
   const budget = Math.min(up, dn), res = [], list = cands.slice(0, P.max_candidates);
   list.forEach(([s, r, c], k) => {
     const x = M.x0 + (c0 + c + 0.5) * M.res, y = M.y0 - (r0 + r + 0.5) * M.res;
-    const surfC = M.S[(r0 + r) * M.W + c0 + c] * 0.1, bh = hb[r * w + c];
+    const surfC = M.surfRC(r0 + r, c0 + c), bh = hb[r * w + c];
     const cd = { x, y, z: surfC + P.rep_mast, base: surfC, roof: bh >= 2, bh };
     const margins = pts.map(p => budget - link(M, cd, p, P.freq).loss - P.sens_dbm);
     res.push(Object.assign(cd, { margins, served: margins.filter(m => m >= P.serve_margin).length, worst: Math.min(...margins) }));
@@ -385,37 +437,49 @@ async function fetchBuf(url, onBytes) {
   const out = new Uint8Array(got); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
   return out.buffer;
 }
-async function loadModel(base, onProgress) {
-  const meta = await (await fetch(base + 'meta.json')).json();
-  const total = Object.values(meta.bytes).reduce((s, v) => s + v, 0); let got = 0;
-  const tick = n => { got += n; onProgress && onProgress(Math.min(got / total, 1)); };
-  const [s, g, t] = await Promise.all(['surface', 'ground', 'tagged'].map(k => fetchBuf(base + meta.files[k], tick)));
-  const S = undelta(await gunzipMaybe(s), meta.width, meta.height);
-  const G = undelta(await gunzipMaybe(g), meta.ground_width, meta.ground_height);
-  const T = new Uint8Array(await gunzipMaybe(t));
-  return new Model(meta, S, G, T);
+async function loadModel(base) {
+  const res = await fetch(base + 'meta.json');
+  if (!res.ok) throw new Error('Cannot load meta.json (' + res.status + ')');
+  return new Model(await res.json(), base);
+}
+
+/* tiles each request needs (UTM box) */
+function needBox(M, type, body) {
+  const P = (() => { try { return params(body.params); } catch (e) { return DEFAULTS; } })();
+  if (type === 'elevation') return M.boxLL([body], 30);
+  if (type === 'profile') return M.boxLL([body.a, body.b], 50);
+  if (type === 'analyze') return M.boxLL(body.points || [], 50 + (P.repeaters ? P.search_pad : 0));
+  if (type === 'viewshed') return M.boxLL(body.points || [body.point], 50 + Math.min(Math.max(+body.radius_m || 10000, 500), 30000));
+  return null;
 }
 
 /* ---------- worker glue ---------- */
 if (typeof self !== 'undefined' && typeof importScripts === 'function') {
-  let M = null;
-  self.onmessage = async ev => {
-    const { id, type, body } = ev.data;
-    const reply = (ok, data) => self.postMessage({ id, ok, data });
+  let M = null, chain = Promise.resolve();
+  const handle = async ({ id, type, body }) => {
+    const reply = (ok, data, transfer) => self.postMessage({ id, ok, data }, transfer || []);
     try {
       if (type === 'init') {
-        M = await loadModel(body.base, p => self.postMessage({ type: 'progress', what: 'download', p }));
-        reply(true, { bounds: M.bounds, defaults: DEFAULTS });
-      } else if (!M) throw new Error('Model not loaded yet');
-      else if (type === 'analyze') reply(true, analyze(M, body, p => self.postMessage({ type: 'progress', what: 'repeaters', p })));
+        M = await loadModel(body.base);
+        return reply(true, { bounds: M.bounds, corners: M.corners, defaults: DEFAULTS, tiles: Object.keys(M.meta.tiles).length, total_mb: Math.round(M.meta.total_bytes / 1e5) / 10 });
+      }
+      if (!M) throw new Error('Model not loaded yet');
+      const box = needBox(M, type, body || {});
+      if (box) {
+        const pts = type === 'elevation' ? [body] : type === 'profile' ? [body.a, body.b] : (body.points || [body.point]);
+        for (const p of pts) { const [x, y] = M.toXY(+p.lon, +p.lat); if (!M.inside(x, y)) throw new Error(`${p.name || 'Point'} is outside the map area of the surface model`); }
+        await M.ensure(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
+      }
+      if (type === 'analyze') reply(true, analyze(M, body, p => self.postMessage({ type: 'progress', what: 'repeaters', p })));
       else if (type === 'profile') reply(true, profile(M, body));
       else if (type === 'elevation') reply(true, elevation(M, +body.lat, +body.lon));
       else if (type === 'viewshed') {
         const v = viewshed(M, body, p => self.postMessage({ type: 'progress', what: 'viewshed', p }));
-        self.postMessage({ id, ok: true, data: v }, [v.bits.buffer, v.cov.buffer]);
-      }
-      else throw new Error('unknown request ' + type);
+        reply(true, v, [v.bits.buffer, v.cov.buffer]);
+      } else throw new Error('unknown request ' + type);
     } catch (e) { reply(false, e.message || String(e)); }
   };
+  // one request at a time, so tile loading and eviction never interleave
+  self.onmessage = ev => { chain = chain.then(() => handle(ev.data)); };
 }
-if (typeof module !== 'undefined') module.exports = { UTM, Model, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, DEFAULTS };
+if (typeof module !== 'undefined') module.exports = { UTM, Model, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, decodeTile, needBox, DEFAULTS };

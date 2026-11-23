@@ -44,11 +44,27 @@ def read_m(ds):
     return a
 
 
+class Grid:
+    """A raster kept in its stored form (e.g. int16 decimetres); indexing returns metres.
+    Halves memory for the 100 km model compared with converting everything to float32."""
+
+    def __init__(self, ds):
+        self.raw = ds.read(1)
+        self.sc = float(ds.scales[0] or 1.0)
+        self.off = float(ds.offsets[0] or 0.0)
+        self.shape = self.raw.shape
+        self.plain = self.raw.dtype.kind == "f" and self.sc == 1.0 and self.off == 0.0
+
+    def __getitem__(self, idx):
+        v = self.raw[idx]
+        return v if self.plain else np.asarray(v, dtype=np.float32) * np.float32(self.sc) + np.float32(self.off)
+
+
 class Surface:
     def __init__(self, surface, ground, tagged=None):
         self.ds = rasterio.open(surface)
-        self.S = read_m(self.ds)
-        self.G = read_m(rasterio.open(ground))
+        self.S = Grid(self.ds)
+        self.G = Grid(rasterio.open(ground))
         self.Tg = rasterio.open(tagged).read(1) if tagged and os.path.exists(tagged) else None
         self.T = self.ds.transform
         self.to_xy = Transformer.from_crs("EPSG:4326", self.ds.crs, always_xy=True)

@@ -155,7 +155,7 @@
       <div class="tools" style="margin-top:10px"><button id="kml">Export KML</button><button id="csvres">Export links CSV</button></div>
     </section>
     <section class="foot">
-      Model: Kyiv + surroundings, 10 m grid. Building heights from OSM tags where available, otherwise estimated from similar buildings nearby. Planning guidance only &mdash; confirm with a field test.<br>
+      Model: 100 × 100 km around Kyiv (blue frame), 10 m grid, downloaded in 10 km tiles only where needed. Building heights from OSM tags where available, otherwise estimated from similar buildings nearby. Planning guidance only &mdash; confirm with a field test.<br>
       Buildings &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a> (ODbL). Terrain: Copernicus WorldDEM&trade;-30 &copy; DLR e.V. 2010&ndash;2014 and &copy; Airbus Defence and Space GmbH 2014&ndash;2018, provided under COPERNICUS by the EU and ESA.<br>
       <a href="https://github.com/distant-m/kyiv-radio-los" target="_blank" rel="noopener">Source code on GitHub</a>
     </section>
@@ -179,7 +179,15 @@ const store = { get(k){ try { return JSON.parse(localStorage.getItem(k)); } catc
 let points = [];      // {name, lat, lon, h, roof, info}
 let selected = -1;
 let result = null;
-let bounds = null;
+let bounds = null, corners = null;
+function inPoly(lat, lon, poly) {   // ray casting; poly = [[lat, lon], ...]
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [yi, xi] = poly[i], [yj, xj] = poly[j];
+    if ((yi > lat) !== (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
 
 // ---------- map ----------
 const map = L.map('map', { zoomControl:true }).setView([50.45, 30.52], 11);
@@ -226,7 +234,7 @@ $('coord').addEventListener('keydown', e => { if (e.key === 'Enter') $('addc').c
 function nextName() { let i = points.length + 1; while (points.some(p => p.name === 'P' + i)) i++; return 'P' + i; }
 
 function addPoint(lat, lon, extra = {}) {
-  if (bounds && !L.latLngBounds(bounds).contains([lat, lon])) {
+  if (corners && !inPoly(lat, lon, corners)) {
     $('cerr').textContent = 'This spot is outside the area of the terrain/building model (blue frame).'; return;
   }
   $('cerr').textContent = '';
@@ -241,6 +249,7 @@ async function fetchInfo(p) {
     const r = await api('/api/elevation', { lat: p.lat, lon: p.lon });
     p.info = r; renderList();
   } catch (e) {}
+  finally { if (!vsBusy && !$('run').disabled) busy(false); }
 }
 
 function changed(keepResults) {
@@ -343,6 +352,8 @@ worker.onmessage = ev => {
   if (m.type === 'progress') {
     $('busybar').style.width = Math.round(m.p * 100) + '%';
     if (m.what === 'download') $('busytext').textContent = `Downloading the Kyiv model… ${Math.round(m.p * 100)}%`;
+    if (m.what === 'tiles') { $('busy').classList.add('on'); $('busytext').textContent = `Downloading map tiles for this area… ${Math.round(m.p * 100)}%`; }
+    if (m.what === 'viewshed' || m.what === 'repeaters') $('busytext').textContent = m.what === 'viewshed' ? 'Calculating visibility…' : 'Searching repeater sites…';
     return;
   }
   const p = pending.get(m.id); if (!p) return; pending.delete(m.id);
@@ -564,12 +575,13 @@ $('kml').onclick = () => { if (!result) return;
   if (typeof DecompressionStream === 'undefined') {
     $('rerr').textContent = 'This browser is too old for the planner. Please update it (Chrome/Edge 80+, Firefox 113+, Safari 16.4+).'; return;
   }
-  busy(true, 'Downloading the Kyiv model… 0%');
+  busy(true, 'Loading…');
   ready = call('init', { base: new URL('data/', location.href).href });
   try {
     const info = await ready;
-    bounds = info.bounds;
-    L.rectangle(bounds, { color: '#1f6feb', weight: 1, fill: false, dashArray: '4 4', interactive: false }).addTo(map);
+    bounds = info.bounds; corners = info.corners;
+    L.polygon(corners, { color: '#1f6feb', weight: 1, fill: false, dashArray: '4 4', interactive: false }).addTo(map);
+    if (!(store.get('rlos_points') || []).length) map.fitBounds(bounds);
     const d = info.defaults, s = store.get('rlos_settings') || {};
     const init = { vsmode: 'sep', vsrad: 10, vsth: 1.5, freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
                    rep: d.repeaters, rtxw: +dbm2w(d.rep_tx_dbm).toFixed(0), rgain: d.rep_gain, rmast: d.rep_mast, minroof: d.min_roof, pad: d.search_pad };

@@ -25,7 +25,9 @@ from shapely import transform as stf
 
 CRS = "EPSG:32636"
 RES = 10.0
-BBOX = (30.20, 50.20, 30.86, 50.62)  # lon_min, lat_min, lon_max, lat_max (Kyiv + margin)
+# Model area in UTM 36N metres: a 100 x 100 km square around Kyiv
+# (~50.0-50.93 N, 29.8-31.24 E; needs Copernicus tiles N50 E029, E030, E031).
+EXTENT = (274000, 5544000, 374000, 5644000)  # x_min, y_min, x_max, y_max
 LEVEL_M = 3.0
 MAX_LEVELS = 50
 MAX_BUILDING_M = 200.0
@@ -71,6 +73,9 @@ def tagged_height(tags):
 
 
 def main(tiles, buildings_json, out_prefix):
+    to_ll = Transformer.from_crs(CRS, "EPSG:4326", always_xy=True)
+    lons, lats = to_ll.transform([EXTENT[0], EXTENT[2], EXTENT[0], EXTENT[2]], [EXTENT[1], EXTENT[1], EXTENT[3], EXTENT[3]])
+    BBOX = (min(lons) - 0.005, min(lats) - 0.005, max(lons) + 0.005, max(lats) + 0.005)
     import os
     os.makedirs(os.path.dirname(out_prefix) or ".", exist_ok=True)
     srcs = [rasterio.open(t) for t in tiles]
@@ -78,9 +83,7 @@ def main(tiles, buildings_json, out_prefix):
     src_crs = srcs[0].crs
 
     to_utm = Transformer.from_crs("EPSG:4326", CRS, always_xy=True)
-    xs, ys = to_utm.transform([BBOX[0], BBOX[2], BBOX[0], BBOX[2]], [BBOX[1], BBOX[1], BBOX[3], BBOX[3]])
-    x0, x1 = np.floor(min(xs) / RES) * RES, np.ceil(max(xs) / RES) * RES
-    y0, y1 = np.floor(min(ys) / RES) * RES, np.ceil(max(ys) / RES) * RES
+    x0, y0, x1, y1 = EXTENT
     W, H = int((x1 - x0) / RES), int((y1 - y0) / RES)
     T = from_origin(x0, y1, RES, RES)
     print("grid", W, "x", H, "=", round(W * H / 1e6, 1), "M cells")
@@ -161,4 +164,5 @@ def main(tiles, buildings_json, out_prefix):
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:3], sys.argv[3], sys.argv[4])
+    # usage: build_surface.py TILE.tif [TILE.tif ...] buildings.json out/kyiv
+    main(sys.argv[1:-2], sys.argv[-2], sys.argv[-1])

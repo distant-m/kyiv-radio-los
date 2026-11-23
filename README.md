@@ -13,7 +13,7 @@ The results come as CSV tables, a KML file (Google Earth, OsmAnd, phone map apps
 
 **https://distant-m.github.io/kyiv-radio-los/**
 
-Open the link on a computer or phone. The page downloads the Kyiv model once (about 11 MB) and does every calculation inside your browser: no server, and your points never leave your device. It needs a recent browser (Chrome/Edge, Firefox 113+, Safari 16.4+).
+Open the link on a computer or phone. The model covers a **100 × 100 km square around Kyiv** and is split into 10 km tiles. The page downloads only the tiles around your points (typically 5–25 MB, cached by the browser) and does every calculation inside your browser: no server, and your points never leave your device. It needs a recent browser (Chrome/Edge, Firefox 113+, Safari 16.4+).
 
 The online version also has a **visibility map** (like HeyWhatsThat's "visibility cloak", but including buildings). Press 👁 on a point or repeater candidate, or choose **All points**. Each point's direct line of sight within the chosen radius (up to 30 km) is shaded, for a target antenna at a height you choose above the ground or roof. Two display modes:
 
@@ -26,7 +26,7 @@ The online version (`docs/`) uses the same models as the Python version. On the 
 
 ## Quick start: run it on your own computer
 
-The repo already contains a ready-made Kyiv model (terrain + buildings, `model/`, 16 MB), so **no data preparation is needed**.
+The repo already contains a ready-made model of the 100 × 100 km square around Kyiv (terrain + buildings, `model/`, 57 MB), so **no data preparation is needed**. The Python app needs about 0.5 GB of RAM for it.
 
 1. Install **Python 3** if you don't have it: <https://www.python.org/downloads/>. On Windows, tick "Add python.exe to PATH" during install.
 2. Download this repo (green **Code** button → **Download ZIP**, then unzip) or `git clone` it.
@@ -37,7 +37,7 @@ The repo already contains a ready-made Kyiv model (terrain + buildings, `model/`
 
 The first start installs the requirements (a minute or two). The app then opens at `http://localhost:8000` in your browser. To stop it, close the terminal window.
 
-The model covers Kyiv and its immediate surroundings (about 50.20–50.62°N, 30.20–30.86°E, shown as a blue frame on the map). For another area, rebuild the model as described under *Rebuilding the model*.
+The model covers a 100 × 100 km square around Kyiv: UTM 36N 274–374 km E, 5544–5644 km N, about 50.0–50.93°N and 29.8–31.24°E, centred ~2 km north of Maidan, shown as a blue frame on the map. It includes Vyshhorod, Brovary, Boryspil, Irpin, Bucha, Hostomel, Boiarka, Vasylkiv's outskirts and Obukhiv's approaches. For another area, change `EXTENT` in `build_surface.py` and rebuild as described under *Rebuilding the model*.
 
 In the app you can:
 
@@ -87,7 +87,7 @@ Treat the results as planning guidance and confirm the best candidates with a fi
 
 ## Rebuilding the model (optional)
 
-Only needed for a different area or fresher OSM data. A model you build goes to `out/` and is used instead of the shipped `model/`. To update the online version as well, run `python3 export_web.py` afterwards and commit `docs/data/`.
+Only needed for a different area or fresher OSM data. A model you build goes to `out/` and is used instead of the shipped `model/`. To update the online version as well, run `python3 export_web.py` afterwards (cuts the model into 10 km tiles in `docs/data/`) and commit `docs/data/`.
 
 ### Data you need (not in the repo)
 
@@ -95,8 +95,9 @@ Only needed for a different area or fresher OSM data. A model you build goes to 
 2. **Copernicus GLO-30 terrain tiles**: free, no account needed (AWS Open Data, maintained by Sinergise):
    - `https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N50_00_E030_00_DEM/Copernicus_DSM_COG_10_N50_00_E030_00_DEM.tif`
    - `https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N50_00_E029_00_DEM/Copernicus_DSM_COG_10_N50_00_E029_00_DEM.tif`
+   - `https://copernicus-dem-30m.s3.amazonaws.com/Copernicus_DSM_COG_10_N50_00_E031_00_DEM/Copernicus_DSM_COG_10_N50_00_E031_00_DEM.tif`
 
-   Each tile is 1°×1° and named after its south-west corner. N50 E030 covers Kyiv city.
+   Each tile is 1°×1° and named after its south-west corner. The 100 km square needs N50 E029, E030 and E031.
 
 Put them in `data/`.
 
@@ -106,8 +107,8 @@ Put them in `data/`.
 # 1. buildings from the OsmAnd map (~30 s)
 python3 extract_buildings.py data/Ukraine_kyiv_europe.obf data/buildings.json
 
-# 2. surface model (~30 s); area is BBOX in build_surface.py (Kyiv + margin)
-python3 build_surface.py data/N50E029.tif data/N50E030.tif data/buildings.json out/kyiv
+# 2. surface model (~1 min, ~4 GB RAM); area is EXTENT in build_surface.py
+python3 build_surface.py data/N50E029.tif data/N50E030.tif data/N50E031.tif data/buildings.json out/kyiv
 
 # 3. analysis
 python3 radio_los.py points.csv --freq 446 --repeaters --out results/
@@ -154,7 +155,8 @@ The surface rasters in `model/` (or `out/`) (`kyiv_surface.tif`, `kyiv_ground.ti
 - Trees are ignored, and so are indoor losses for radios inside buildings.
 - Very tall entries can be towers or masts rather than roofs; candidates ≥ 190 m are labelled "check".
 - OSM heights are only as good as the mappers made them. Estimated heights can be wrong by tens of metres for high-rises.
-- To change the area, edit `BBOX` in `build_surface.py`. Above ~50 × 50 km at 10 m, memory use grows (~100 MB per raster).
+- To change the area, edit `EXTENT` in `build_surface.py` (keep it a multiple of 10 km for the web tiles). The build holds the whole area in memory: about 4 GB for 100 × 100 km.
+- In the browser, a visibility map from many points with a 30 km radius can need most of the 100 tiles (up to ~260 MB of memory). That's fine on a computer, but may be too much for older phones.
 
 ## Data sources and licences
 
