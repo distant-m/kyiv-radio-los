@@ -203,7 +203,11 @@ const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Wo
 const linkLayer = L.layerGroup().addTo(map), repLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map);
 const legend = L.control({ position:'bottomleft' });
 legend.onAdd = () => { const d = L.DomUtil.create('div','legend');
-  d.innerHTML = Object.entries(COLORS).map(([k,c]) => `<i style="background:${c}"></i>${k}`).join('<br>') + '<br><span style="color:#6b7480">dashed = no line of sight<br>dotted = via street reflections<br>bent line with ○ = via a wall</span>'; return d; };
+  const sample = (dash, w, cap, bent) => `<svg width="34" height="12" style="vertical-align:middle;margin-right:6px">${bent
+      ? '<polyline points="1,10 17,3 33,10" fill="none" stroke="#555" stroke-width="2.5"/><circle cx="17" cy="3" r="2.6" fill="#fff" stroke="#6a3d9a" stroke-width="1.5"/>'
+      : `<line x1="2" y1="6" x2="32" y2="6" stroke="#555" stroke-width="${w}" stroke-dasharray="${dash}" stroke-linecap="${cap}"/>`}</svg>`;
+  d.innerHTML = Object.entries(COLORS).map(([k,c]) => `<i style="background:${c}"></i>${k}`).join('<br>') +
+    `<div style="color:#6b7480;margin-top:4px">${sample('', 3, 'butt')}line of sight<br>${sample('12 8', 3, 'butt')}over roofs (no line of sight)<br>${sample('0.1 9', 5, 'round')}along streets (statistical)<br>${sample('', 0, '', true)}via a wall (○ = wall)</div>`; return d; };
 legend.addTo(map);
 
 map.on('click', e => addPoint(e.latlng.lat, e.latlng.lng));
@@ -393,7 +397,7 @@ $('runr').onclick = () => runAnalyze(true);
 function clearResults() { result = null; linkLayer.clearLayers(); repLayer.clearLayers(); $('res').hidden = true; closeProfile(); }
 
 function linkLine(a, b, status, los, opts = {}) {
-  return L.polyline([[a.lat, a.lon], [b.lat, b.lon]], Object.assign({ color: COLORS[status], weight: status === 'no link' ? 2 : 4, opacity: .9, dashArray: los ? null : '7 6' }, opts));
+  return L.polyline([[a.lat, a.lon], [b.lat, b.lon]], Object.assign({ color: COLORS[status], weight: status === 'no link' ? 2 : 4, opacity: .9, dashArray: los ? null : '12 8', lineCap: 'butt' }, opts));
 }
 
 function showResults() {
@@ -407,16 +411,20 @@ function showResults() {
       `line of sight: ${l.los ? 'yes' : 'no'} · Fresnel ${l.fresnel}` + (l.los ? '' : `<br>blocked by: ${l.obstacle}${l.obstacle === 'building' ? ' (' + l.obstacle_height + ' height)' : ''}`);
     if (l.refl) {
       const r = l.refl;
-      h += `<hr style="border:none;border-top:1px solid #eee">direct / over roofs: ${r.direct_margin} dB<br>` +
-        `+ wall reflections: ${r.walls_margin} dB` + (r.best ? ` (best wall: ${r.best.margin} dB, ${r.best.wall_m} m wall, ${r.best.angle}° incidence, +${r.best.extra_m} m path)` : ' (no usable wall found)') + '<br>' +
-        `street multipath (ITU-R P.1411): ${r.street ? r.street.margin + ' dB' + (r.street.extrapolated ? ' (extrapolated &gt; 3 km)' : '') + ` · ${r.street.built_share}% of path in buildings` : 'not applicable'}` +
+      const wg = r.walls_gain;
+      h += `<hr style="border:none;border-top:1px solid #eee"><b>Estimates</b> (margin):<br>• direct / over roofs: ${r.direct_margin} dB<br>` +
+        `• adding wall reflections: ${r.walls_margin} dB ` + (r.best
+          ? (wg >= 0.5 ? `(walls add +${wg} dB; best wall alone ${r.best.margin} dB: ${r.best.wall_m} m wall, ${r.best.angle}° incidence, path +${r.best.extra_m} m)`
+                       : `(no real help: the best wall alone gives only ${r.best.margin} dB, adding +${wg} dB)`)
+          : '(no usable wall found)') + '<br>• ' +
+        `along streets (ITU-R P.1411): ${r.street ? r.street.margin + ' dB' + (r.street.extrapolated ? ' (extrapolated &gt; 3 km)' : '') + ` · ${r.street.built_share}% of path in buildings` : 'not used (needs both antennas ≤ 10 m above ground, built-up path, ≤ 5 km)'}` +
         (r.used === 'street' ? `<br><span style="color:#6b7480">Median estimate: in about 1 spot in 10 expect ≥ 9 dB less.</span>` : '');
     }
     return h + `<br>model used: ${l.model}`;
   };
   links.forEach(l => {
     const used = l.refl ? l.refl.used : 'direct';
-    const st = used === 'street' ? { dashArray: '2 7', weight: 4 } : used === 'walls' ? { dashArray: '3 6', weight: 2, opacity: .45 } : {};
+    const st = used === 'street' ? { dashArray: '0.1 9', weight: 6, lineCap: 'round' } : used === 'walls' ? { dashArray: '12 8', weight: 2, opacity: .45 } : {};
     linkLine(byName[l.a], byName[l.b], l.status, l.los || used === 'street', st).bindPopup(popup(l)).on('click', () => openProfile(l.a, l.b)).addTo(linkLayer);
     if (l.refl && l.refl.best && l.refl.used === 'walls') {
       const R = [l.refl.best.lat, l.refl.best.lon];
