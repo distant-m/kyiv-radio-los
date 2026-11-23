@@ -22,14 +22,16 @@ The online version also has a **visibility map** (like HeyWhatsThat's "visibilit
 
 A square is coloured only if all of it is visible. Checked against the per-link line-of-sight calculation: 96–99% agreement per point, and every sampled "seen by all" square was confirmed.
 
-**Analyze + reflections** (online version) also counts signals that don't travel in a straight line. Each link uses the best of three estimates:
+**Analyze + reflections** (online version) also counts signals that don't travel in a straight line. Each link uses the best of these estimates:
 1. **Direct / over roofs:** as in plain Analyze.
 2. **Wall reflections:** single bounces off real building walls (OSM outlines, ~300,000 buildings). Each wall is a flat mirror. The bounce must land on the wall face, below the roof edge, and each leg gets the usual diffraction. Wall loss = Fresnel reflection of a vertical antenna on concrete/brick (about 8 dB head-on, 1–2 dB at glancing angles) + a size penalty when the wall is smaller than the first Fresnel zone on it + an adjustable extra loss for windows and balconies (default 3 dB). The direct path and the best 5 bounces are added as power. A winning wall is drawn as a bent line, with ○ on the wall.
 3. **Street multipath, statistical:** Recommendation ITU-R P.1411 section 4.3.1 (site-general model for terminals near street level, from measurements in cities): median loss = 9.5 + 45·log₁₀ f[MHz] + 40·log₁₀ d[km] + L_urban, where L_urban = 0 suburban / 6.8 urban / 2.3 dense urban; spread σ = 7 dB. Used only if both antennas are ≤ 10 m above ground, the path crosses built-up area, and d ≤ 5 km (3–5 km flagged as extrapolated; the ITU validity is 3 km). Drawn as a dotted line.
 
+4. **Street corridors** (optional checkbox): the signal runs along real streets (OSM street network from the OsmAnd map), losing power at each corner. The model is J.-E. Berg's recursive street model as used in ETSI TR 125 942 (3GPP TR 25.942): path loss = 20·log₁₀(4π·dₙ/λ), where the "illusory distance" dₙ is built segment by segment, k_j = k_(j−1) + d_(j−1)·q(θ) and d_j = k_j·s_j + d_(j−1), with q(θ) = q90·(θ/90°)^1.5 (q90 = 0.5 for a 90° corner) and a 300 m breakpoint after which a straight segment's slope rises from 2 to 4. A straight segment is a line-of-sight run along the street (the route stays within ±10 m of its line). The route is searched in a corridor around the straight line (½ × 25% of the distance, 300–1,500 m), with at most 6 corners. Each point joins a street within 200 m that it can see (or pays the diffraction loss of that short leg). The route is drawn on the map. With the standard ~2 GHz values every corner costs roughly 20–30 dB, so it mainly wins for one-corner links. At UHF corners are probably gentler: the corner factor and breakpoint are adjustable, for tuning against field measurements.
+
 This is a rough estimate (think ±10 dB). It handles a single bounce only, and treats all walls as the same material. The statistical part is a median, so in about one spot in ten the signal is ≥ 9 dB weaker.
 
-The online version (`docs/`) uses the same models as the Python version. On the test set its link margins agree within 0.5 dB for 90% of links, with the same link status and line-of-sight results, and the same top repeater sites.
+The online version (`docs/`) uses the same models as the Python version. On the test set its link margins agree within 0.5 dB for 90% of links, with the same line-of-sight results and top repeater sites; link status matches except occasionally right at a class boundary.
 
 ## Quick start: run it on your own computer
 

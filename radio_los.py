@@ -108,6 +108,8 @@ def deygout(d, z, h_a, h_b, lam, depth=0):
         return 0.0
     k = i + 1
     loss = float(J(v[i]))
+    if v[i] <= 0:   # edge below the line of sight: its own loss only (no split, see engine.js)
+        return loss
     loss += deygout(d[:k + 1], z[:k + 1], h_a, z[k], lam, depth + 1)
     loss += deygout(d[k:], z[k:], z[k], h_b, lam, depth + 1)
     return loss

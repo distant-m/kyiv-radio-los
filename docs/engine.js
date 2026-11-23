@@ -12,10 +12,10 @@ const STEP = 5.0;
 
 const DEFAULTS = { freq: 446, tx_dbm: 37, sens_dbm: -118, gain_tx: 0, gain_rx: 0, losses: 3,
   repeaters: false, rep_tx_dbm: 44, rep_gain: 3, rep_mast: 3, min_roof: 25, serve_margin: 10,
-  search_pad: 2000, max_candidates: 600, wall_extra: 3, wall_er: 5, l_urban: 6.8 };
+  search_pad: 2000, max_candidates: 600, wall_extra: 3, wall_er: 5, l_urban: 6.8, q90: 0.5, q_nu: 1.5, x_br: 300 };
 const LIMITS = { freq: [30, 6000], tx_dbm: [-10, 60], sens_dbm: [-150, -60], gain_tx: [-10, 30], gain_rx: [-10, 30],
   losses: [0, 40], rep_tx_dbm: [0, 60], rep_gain: [-10, 30], rep_mast: [0, 100], min_roof: [0, 300],
-  serve_margin: [-20, 60], search_pad: [0, 10000], max_candidates: [10, 3000], wall_extra: [0, 30], wall_er: [1.5, 80], l_urban: [0, 20] };
+  serve_margin: [-20, 60], search_pad: [0, 10000], max_candidates: [10, 3000], wall_extra: [0, 30], wall_er: [1.5, 80], l_urban: [0, 20], q90: [0.05, 2], q_nu: [0.5, 3], x_br: [0, 5000] };
 
 /* ---------- UTM (WGS84) via Krüger series, accurate to well below 1 mm in the zone ---------- */
 const UTM = (() => {
@@ -68,7 +68,7 @@ class Model {
     Object.assign(this, { meta, base });
     this.W = meta.width; this.H = meta.height; this.x0 = meta.x0; this.y0 = meta.y0; this.res = meta.res; this.zone = meta.utm_zone;
     this.TS = meta.tile; this.GF = meta.ground_factor; this.GT = meta.tile / meta.ground_factor + 2;
-    this.tiles = new Map(); this.clock = 0; this.walls = new Map();
+    this.tiles = new Map(); this.clock = 0; this.walls = new Map(); this.streets = new Map();
     const c = [[0, this.H], [this.W, this.H], [this.W, 0], [0, 0]].map(([cc, rr]) => this.toLL(this.x0 + cc * this.res, this.y0 - rr * this.res));
     this.corners = c.map(([lon, lat]) => [lat, lon]);   // SW, SE, NE, NW
     this.bounds = [[Math.min(...c.map(p => p[1])), Math.min(...c.map(p => p[0]))], [Math.max(...c.map(p => p[1])), Math.max(...c.map(p => p[0]))]];
@@ -145,6 +145,20 @@ class Model {
     }));
     return missing.length;
   }
+  async ensureStreets(box, onProgress) {
+    if (!this.meta.streets) return 0;
+    const c0 = Math.max(Math.floor(this.col(box[0]) / this.TS) - 1, 0), c1 = Math.min(Math.floor(this.col(box[2]) / this.TS) + 1, this.W / this.TS - 1);
+    const r0 = Math.max(Math.floor(this.row(box[3]) / this.TS) - 1, 0), r1 = Math.min(Math.floor(this.row(box[1]) / this.TS) + 1, this.H / this.TS - 1);
+    const missing = [];
+    for (let ty = r0; ty <= r1; ty++) for (let tx = c0; tx <= c1; tx++) { const k = `${tx}_${ty}`; if (k in this.meta.streets && !this.streets.has(k)) missing.push(k); }
+    const total = missing.reduce((s, k) => s + this.meta.streets[k], 0) || 1; let got = 0;
+    await Promise.all(missing.map(async k => {
+      const buf = await gunzipMaybe(await fetchBuf(this.base + `s_${k}.bin.gz`, n => { got += n; onProgress && onProgress(Math.min(got / total, 1)); }));
+      const [tx, ty] = k.split('_').map(Number);
+      this.streets.set(k, decodeStreets(buf, this.x0 + tx * this.TS * this.res, this.y0 - (ty + 1) * this.TS * this.res));
+    }));
+    return missing.length;
+  }
   wallTilesIn(box) {
     const out = [];
     for (const [k, w] of this.walls) if (!(w.box[2] < box[0] || w.box[0] > box[2] || w.box[3] < box[1] || w.box[1] > box[3])) out.push(w);
@@ -172,6 +186,18 @@ function decodeWalls(buf, ox, oy) {
   }
   return { segs: new Float64Array(segs), box: [bx0, by0, bx1, by1] };
 }
+/* streets: list of polylines (Float64Array [x0, y0, x1, y1, ...] in UTM); pieces meet at identical ends */
+function decodeStreets(buf, ox, oy) {
+  const a = new Int16Array(buf), lines = [];
+  let i = 0;
+  while (i < a.length) {
+    const n = a[i++]; let x = a[i++], y = a[i++];
+    const p = new Float64Array(2 * n); p[0] = ox + x / 2; p[1] = oy + y / 2;
+    for (let k = 1; k < n; k++) { x += a[i++]; y += a[i++]; p[2 * k] = ox + x / 2; p[2 * k + 1] = oy + y / 2; }
+    lines.push(p);
+  }
+  return lines;
+}
 function decodeTile(buf, TS, GT) {
   const nS = TS * TS, nG = GT * GT;
   if (buf.byteLength !== 2 * nS + 2 * nG + nS / 8) throw new Error('map tile has unexpected size');
@@ -192,6 +218,10 @@ function deygout(d, z, i0, i1, ha, hb, lam, depth) {
     if (v > best) { best = v; bi = i; }
   }
   if (best <= -0.78) return 0;
+  // split at the main edge only if it actually blocks the line of sight; an edge just below the
+  // line only costs its own (small) loss - splitting there would measure other obstacles against
+  // lowered sub-paths and overstate the loss of a nearly clear path
+  if (best <= 0) return J(best);
   return J(best) + deygout(d, z, i0, bi, ha, z[bi], lam, depth + 1) + deygout(d, z, bi, i1, z[bi], hb, lam, depth + 1);
 }
 
@@ -318,6 +348,152 @@ function streetLoss(M, a, b, P) {
   return { loss: Math.max(L, fspl), built_share: Math.round(inB / n * 100), extrapolated: D > 3000 };
 }
 
+/* ---------- street corridors: Berg's recursive street model ----------
+ * The signal runs along straight street segments; each corner adds loss that grows with the
+ * distances on both sides of it ("illusory distance"), as in the micro-cell model of
+ * ETSI TR 125 942 (3GPP TR 25.942) after J.-E. Berg, PIMRC 1995:
+ *   k_j = k_(j-1) + d_(j-1) * q(theta_j),  d_j = k_j * s_j + d_(j-1),  k_0 = 1, d_0 = 0
+ *   q(theta) = q90 * (theta / 90)^nu  (q = q90 = 0.5 for a 90-degree corner, as in ETSI)
+ *   L = 20 log10(4 pi d_n / lambda) + 20 log10(prod D(s_j)),  D(s) = s / x_br beyond x_br (300 m)
+ *       (slope 2 before the 300 m breakpoint and 4 after it, applied per straight segment)
+ * A straight segment is a line-of-sight run along the street: the route stays in it while it keeps
+ * within +-10 m (about half a street) of the line from the segment's start; jogs at junctions,
+ * medians and kinks don't count as corners. A corner's angle is measured between the segment's
+ * direction and the new direction; corners under 15 degrees cost nothing. The route is searched only in a
+ * corridor around the straight line between the points. Each point joins the street network at
+ * a street spot within 200 m that it can see (or, failing that, with the diffraction loss of
+ * that short leg added); the leg itself is the first / last segment.
+ */
+const STRAIGHT_DEG = 15, MAX_TURNS = 6, HALF_STREET = 10;
+function bergRoute(M, a, b, P) {
+  const lam = 299.792458 / P.freq, D = Math.hypot(b.x - a.x, b.y - a.y);
+  if (D < 30) return { none: true, reason: 'points closer than 30 m' };
+  const hw = Math.min(Math.max(0.25 * D, 300), 1500), ATT = 200;
+  const ux = (b.x - a.x) / D, uy = (b.y - a.y) / D;
+  const inCorr = (x, y) => { const t = (x - a.x) * ux + (y - a.y) * uy, n = Math.abs(-(x - a.x) * uy + (y - a.y) * ux);
+    return t > -ATT && t < D + ATT && n < hw; };
+  // graph of densified street vertices inside the corridor
+  const id = new Map(), X = [], Y = [], adj = [];
+  const node = (x, y) => { const k = Math.round(x * 2) * 4e6 + Math.round(y * 2); let i = id.get(k);
+    if (i === undefined) { i = X.length; id.set(k, i); X.push(x); Y.push(y); adj.push([]); } return i; };
+  const box = [Math.min(a.x, b.x) - hw - ATT, Math.min(a.y, b.y) - hw - ATT, Math.max(a.x, b.x) + hw + ATT, Math.max(a.y, b.y) + hw + ATT];
+  for (const lines of M.streets.values()) for (const p of lines) {
+    let anyIn = false;
+    for (let k = 0; k < p.length; k += 2) if (inCorr(p[k], p[k + 1])) { anyIn = true; break; }
+    if (!anyIn) continue;
+    let prev = node(p[0], p[1]);
+    for (let k = 2; k < p.length; k += 2) {
+      const x0 = p[k - 2], y0 = p[k - 1], x1 = p[k], y1 = p[k + 1], len = Math.hypot(x1 - x0, y1 - y0);
+      const m = Math.max(1, Math.ceil(len / 25));          // vertices every <= 25 m, for joining points
+      for (let s = 1; s <= m; s++) {
+        const cur = s === m ? node(x1, y1) : node(x0 + (x1 - x0) * s / m, y0 + (y1 - y0) * s / m);
+        if (cur !== prev) { adj[prev].push(cur); adj[cur].push(prev); }
+        prev = cur;
+      }
+    }
+  }
+  if (!X.length) return { none: true, reason: 'no streets in the corridor' };
+  const q = th => th < STRAIGHT_DEG ? 0 : P.q90 * Math.pow(th / 90, P.q_nu);
+  const Dbp = s => P.x_br > 0 && s > P.x_br ? s / P.x_br : 1;   // x_br = 0 switches the breakpoint off
+  const turn = (dx1, dy1, dx2, dy2) => { const c = (dx1 * dx2 + dy1 * dy2) / (Math.hypot(dx1, dy1) * Math.hypot(dx2, dy2) || 1);
+    return Math.acos(Math.max(-1, Math.min(1, c))) * 180 / Math.PI; };
+  // joining legs: street spots within ATT m that the point can see (or the least obstructed ones)
+  const legs = (pt) => {
+    const out = [];
+    for (let i = 0; i < X.length; i++) {
+      const d = Math.hypot(X[i] - pt.x, Y[i] - pt.y);
+      if (d > ATT) continue;
+      out.push([i, d]);
+    }
+    out.sort((p, r) => p[1] - r[1]);
+    const res = [];
+    for (const [i, d] of out.slice(0, 60)) {
+      const S = { x: X[i], y: Y[i], z: M.ground(X[i], Y[i]) + 1.5 };
+      const pen = d < 12 ? 0 : link(M, pt, S, P.freq).diff;
+      if (pen <= 25) res.push({ i, d, pen });
+    }
+    return res;
+  };
+  // stays straight if w is within HALF_STREET of the line from the segment start through v (or the segment is still short)
+  const offLine = (sx, sy, vx, vy, wx, wy) => {
+    const lx = vx - sx, ly = vy - sy, l = Math.hypot(lx, ly);
+    if (l < HALF_STREET) return 0;
+    const t = ((wx - sx) * lx + (wy - sy) * ly) / l;
+    if (t < l - 1) return Infinity;                       // going backwards = a corner
+    return Math.abs(-(wx - sx) * ly + (wy - sy) * lx) / l;
+  };
+  const startLegs = legs(a), endLegs = legs(b);
+  if (!startLegs.length || !endLegs.length)
+    return { none: true, reason: `${!startLegs.length ? 'first' : 'second'} point is not in view of a street within ${ATT} m` };
+  const exitAt = new Map(endLegs.map(e => [e.i, e]));
+  // Dijkstra over (node, came-from node); label = illusory-distance state
+  const heap = [], best = new Map(), from = new Map();
+  const push = (st) => { heap.push(st); let i = heap.length - 1;
+    while (i > 0) { const p = (i - 1) >> 1; if (heap[p].pr <= heap[i].pr) break; [heap[p], heap[i]] = [heap[i], heap[p]]; i = p; } };
+  const pop = () => { const top = heap[0], last = heap.pop();
+    if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i;
+      if (l < heap.length && heap[l].pr < heap[m].pr) m = l; if (r < heap.length && heap[r].pr < heap[m].pr) m = r;
+      if (m === i) break; [heap[m], heap[i]] = [heap[i], heap[m]]; i = m; } } return top; };
+  const prio = st => (st.k * st.s + st.d) * st.Dp * Dbp(st.s) * Math.pow(10, st.pen / 20);
+  for (const L0 of startLegs) {
+    const st = { node: L0.i, prevX: a.x, prevY: a.y, sx: a.x, sy: a.y, k: 1, d: 0, s: L0.d, Dp: 1, pen: L0.pen, turns: 0, key: L0.i + ':a' };
+    st.pr = prio(st); push(st); from.set(st.key, null);
+  }
+  let bestEnd = null, pops = 0;
+  while (heap.length && pops < 400000) {
+    const st = pop(); pops++;
+    if (bestEnd && st.pr >= bestEnd.pr) break;
+    if (best.has(st.key) && best.get(st.key) <= st.pr) continue;
+    best.set(st.key, st.pr);
+    const e = exitAt.get(st.node);
+    if (e) {   // try finishing here: last leg to b
+      const v0 = st.node, straight = e.d < 1 || offLine(st.sx, st.sy, X[v0], Y[v0], b.x, b.y) <= HALF_STREET;
+      const th = straight ? 0 : turn(X[v0] - st.sx, Y[v0] - st.sy, b.x - X[v0], b.y - Y[v0]);
+      let k = st.k, d = st.d, s = st.s, Dp = st.Dp, turns = st.turns;
+      if (q(th) > 0) { if (turns >= (P.max_turns || MAX_TURNS)) continue; d = k * s + d; Dp *= Dbp(s); k = k + d * q(th); s = e.d; turns++; } else s += e.d;
+      const fin = { d: k * s + d, Dp: Dp * Dbp(s), pen: st.pen + e.pen, turns, key: st.key, node: st.node };
+      fin.pr = fin.d * fin.Dp * Math.pow(10, fin.pen / 20);
+      if (!bestEnd || fin.pr < bestEnd.pr) bestEnd = fin;
+    }
+    const v = st.node;
+    for (const w of adj[v]) {
+      if (!inCorr(X[w], Y[w]) || w === st.prevNode) continue;
+      const len = Math.hypot(X[w] - X[v], Y[w] - Y[v]);
+      let k = st.k, d = st.d, s = st.s, Dp = st.Dp, turns = st.turns, sx = st.sx, sy = st.sy;
+      if (offLine(sx, sy, X[v], Y[v], X[w], Y[w]) > HALF_STREET) {
+        const th = turn(X[v] - sx, Y[v] - sy, X[w] - X[v], Y[w] - Y[v]);
+        if (q(th) > 0) { if (turns >= (P.max_turns || MAX_TURNS)) continue; d = k * s + d; Dp *= Dbp(s); k = k + d * q(th); s = 0; turns++; }
+        sx = X[v]; sy = Y[v];
+      }
+      s += len;
+      const nst = { node: w, prevNode: v, prevX: X[v], prevY: Y[v], sx, sy, k, d, s, Dp, pen: st.pen, turns, key: w + ':' + Math.round(sx) + ',' + Math.round(sy) };
+      nst.pr = prio(nst);
+      if (best.has(nst.key) && best.get(nst.key) <= nst.pr) continue;
+      from.set(nst.key, st.key); push(nst);
+    }
+  }
+  if (!bestEnd) return { none: true, reason: `no street route with at most ${P.max_turns || MAX_TURNS} corners inside the corridor` };
+  // rebuild the route
+  const route = [[b.x, b.y]];
+  for (let k = bestEnd.key; k; k = from.get(k)) { const n = +k.split(':')[0]; route.push([X[n], Y[n]]); }
+  route.push([a.x, a.y]); route.reverse();
+  let len = 0; for (let i = 1; i < route.length; i++) len += Math.hypot(route[i][0] - route[i - 1][0], route[i][1] - route[i - 1][1]);
+  const loss = 20 * Math.log10(4 * Math.PI * bestEnd.d * bestEnd.Dp / lam) + bestEnd.pen;
+  // how much of the route runs between building walls (both sides within 30 m)
+  let walled = 0, nS = 0;
+  for (let i = 1; i < route.length; i++) {
+    const [x0, y0] = route[i - 1], [x1, y1] = route[i], l = Math.hypot(x1 - x0, y1 - y0); if (l < 1) continue;
+    const nx = -(y1 - y0) / l, ny = (x1 - x0) / l;
+    for (let t = 5; t < l; t += 20) {
+      const x = x0 + (x1 - x0) * t / l, y = y0 + (y1 - y0) * t / l; nS++;
+      const side = sg => { for (let o = 6; o <= 30; o += 4) { const px = x + sg * nx * o, py = y + sg * ny * o; if (M.inside(px, py) && M.surf(px, py) - M.ground(px, py) > 2) return true; } return false; };
+      if (side(1) && side(-1)) walled++;
+    }
+  }
+  return { loss, illusory_m: bestEnd.d * bestEnd.Dp, turns: bestEnd.turns, route_m: len, join_db: bestEnd.pen,
+    walled: nS ? Math.round(walled / nS * 100) : 0, route: route.map(([x, y]) => { const [lon, lat] = M.toLL(x, y); return [Math.round(lat * 1e6) / 1e6, Math.round(lon * 1e6) / 1e6]; }) };
+}
+
 const classify = m => m >= 20 ? 'good' : m >= 10 ? 'marginal' : m >= 0 ? 'weak' : 'no link';
 const r1 = v => Math.round(v * 10) / 10;
 
@@ -355,7 +531,7 @@ function placePoints(M, raw) {
   });
 }
 
-function computeLinks(M, pts, P, withRefl, onProgress) {
+function computeLinks(M, pts, P, withRefl, onProgress, withCorr) {
   const budget = P.tx_dbm + P.gain_tx + P.gain_rx - P.losses, rows = [], total = pts.length * (pts.length - 1) / 2;
   for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
     const L = link(M, pts[i], pts[j], P.freq);
@@ -365,11 +541,17 @@ function computeLinks(M, pts, P, withRefl, onProgress) {
       // incoherent power sum of the direct path and the best reflected paths
       const pw = [L.loss, ...R.paths.map(p => p.loss)].reduce((s, l) => s + Math.pow(10, -l / 10), 0);
       const det = -10 * Math.log10(pw), st = streetLoss(M, pts[i], pts[j], P);
-      loss = st && st.loss < det ? st.loss : det;
+      const br = withCorr ? bergRoute(M, pts[i], pts[j], P) : null;
+      loss = det;
+      if (st && st.loss < loss) loss = st.loss;
+      // a route without corners is plain line of sight along one street - the direct estimate covers it
+      if (br && !br.none && br.turns >= 1 && br.loss < loss) loss = br.loss;
       refl = { found: R.paths.length, candidates: R.candidates, direct_margin: r1(budget - L.loss - P.sens_dbm),
         gain_db: r1(L.loss - loss), walls_margin: r1(budget - det - P.sens_dbm), walls_gain: r1(L.loss - det),
         street: st ? { margin: r1(budget - st.loss - P.sens_dbm), built_share: st.built_share, extrapolated: st.extrapolated } : null,
-        used: st && st.loss < det ? 'street' : (L.loss - det >= 0.5 ? 'walls' : 'direct'),
+        corridor: !withCorr ? null : br.none ? { none: true, reason: br.reason }
+          : { margin: r1(budget - br.loss - P.sens_dbm), turns: br.turns, route_m: Math.round(br.route_m), walled: br.walled, join_db: r1(br.join_db), route: br.route },
+        used: br && !br.none && br.turns >= 1 && br.loss === loss ? 'corridor' : st && st.loss === loss ? 'street' : (L.loss - det >= 0.5 ? 'walls' : 'direct'),
         best: R.paths[0] ? (() => { const p = R.paths[0], [lon, lat] = M.toLL(p.rx, p.ry);
           return { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6, margin: r1(budget - p.loss - P.sens_dbm),
             extra_m: Math.round(p.d1 + p.d2 - L.dist_km * 1000), refl_loss: r1(p.refl), diff: r1(p.diff), angle: p.angle, wall_m: p.wall_m, height: p.height }; })() : null,
@@ -379,7 +561,8 @@ function computeLinks(M, pts, P, withRefl, onProgress) {
     const rx = budget - loss, margin = rx - P.sens_dbm;
     rows.push({ a: pts[i].name, b: pts[j].name, dist_km: Math.round(L.dist_km * 100) / 100, los: L.los,
       fresnel: Math.round(L.fresnel * 100) / 100, fspl: r1(L.fspl), diff: r1(L.diff),
-      model: !refl || refl.used === 'direct' ? L.model : refl.used === 'walls' ? L.model + ' + wall reflection' : 'street multipath (ITU-R P.1411)' + (refl.street.extrapolated ? ', extrapolated beyond 3 km' : ''),
+      model: !refl || refl.used === 'direct' ? L.model : refl.used === 'walls' ? L.model + ' + wall reflection'
+        : refl.used === 'corridor' ? "street corridor (Berg's recursive model)" : 'street multipath (ITU-R P.1411)' + (refl.street.extrapolated ? ', extrapolated beyond 3 km' : ''),
       rx_dbm: r1(rx), margin: r1(margin), status: classify(margin), refl,
       obstacle: L.building ? 'building' : 'terrain', obstacle_height: L.tagged ? 'tagged' : 'estimated' });
   }
@@ -440,7 +623,7 @@ function repeaterSearch(M, pts, P, onProgress, top = 15) {
 function analyze(M, body, onProgress) {
   const P = params(body.params), pts = placePoints(M, body.points || []);
   if (pts.length < 1) throw new Error('Add at least one point');
-  const links = pts.length >= 2 ? computeLinks(M, pts, P, !!body.reflections, p => onProgress && onProgress(p, 'reflections')) : [];
+  const links = pts.length >= 2 ? computeLinks(M, pts, P, !!body.reflections, p => onProgress && onProgress(p, 'reflections'), !!(body.reflections && body.corridors)) : [];
   const repeaters = P.repeaters ? repeaterSearch(M, pts, P, onProgress) : [];
   return { points: pts.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof, base: r1(p.base), antenna_asl: r1(p.z) })),
     links, repeaters, params: P };
@@ -593,6 +776,7 @@ function needBox(M, type, body) {
       for (let i = 0; i < xy.length; i++) for (let j = i + 1; j < xy.length; j++) {
         const D = Math.hypot(xy[i][0] - xy[j][0], xy[i][1] - xy[j][1]), e = Math.min(Math.max(0.3 * D, 1000), 3000);
         pad = Math.max(pad, Math.sqrt(((D + e) / 2) ** 2 - (D / 2) ** 2) + 50);
+        if (body.corridors) pad = Math.max(pad, Math.min(Math.max(0.25 * D, 300), 1500) + 250);
       }
     }
     return M.boxLL(body.points || [], pad);
@@ -618,6 +802,7 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
         for (const p of pts) { const [x, y] = M.toXY(+p.lon, +p.lat); if (!M.inside(x, y)) throw new Error(`${p.name || 'Point'} is outside the map area of the surface model`); }
         await M.ensure(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
         if (type === 'analyze' && body.reflections) await M.ensureWalls(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
+        if (type === 'analyze' && body.reflections && body.corridors) await M.ensureStreets(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
       }
       if (type === 'analyze') reply(true, analyze(M, body, (p, what) => self.postMessage({ type: 'progress', what: what || 'repeaters', p })));
       else if (type === 'profile') reply(true, profile(M, body));
@@ -631,4 +816,4 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
   // one request at a time, so tile loading and eviction never interleave
   self.onmessage = ev => { chain = chain.then(() => handle(ev.data)); };
 }
-if (typeof module !== 'undefined') module.exports = { UTM, Model, decodeWalls, reflectionPaths, wallLoss, streetLoss, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, decodeTile, needBox, DEFAULTS };
+if (typeof module !== 'undefined') module.exports = { UTM, Model, decodeWalls, decodeStreets, bergRoute, reflectionPaths, wallLoss, streetLoss, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, decodeTile, needBox, DEFAULTS };
