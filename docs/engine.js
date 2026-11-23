@@ -76,7 +76,7 @@ class Model {
   row(y) { return (this.y0 - y) / this.res; }
   inside(x, y) { const r = this.row(y), c = this.col(x); return r >= 0 && r < this.H && c >= 0 && c < this.W; }
   idx(x, y) {
-    let r = Math.round(this.row(y)), c = Math.round(this.col(x));
+    let r = Math.floor(this.row(y)), c = Math.floor(this.col(x));   // pixel containing the point
     r = r < 0 ? 0 : r >= this.H ? this.H - 1 : r; c = c < 0 ? 0 : c >= this.W ? this.W - 1 : c;
     return r * this.W + c;
   }
@@ -283,6 +283,57 @@ function elevation(M, lat, lon) {
   return { inside: true, ground: r1(g), surface: r1(s), building: s - g > 1 ? r1(s - g) : 0, height_tagged: !!M.tagged(x, y) };
 }
 
+/* ---------- viewshed ("visibility cloak") ----------
+ * Rays from the observer to every edge cell of a lat/lon grid (cell ~cellM metres).
+ * Along each ray the terrain+buildings surface is sampled every STEP_V metres; a cell is visible
+ * when a target standing `targetH` metres above the surface there (ground or roof) is above
+ * the highest elevation angle met so far. 4/3 earth curvature included.
+ * Returns a mask: 0 = outside radius/model, 1 = not visible, 2 = visible.
+ */
+function viewshed(M, body) {
+  const P = params(body.params);
+  const radius = Math.min(Math.max(+body.radius_m || 10000, 500), 30000);
+  const targetH = Math.min(Math.max(+body.target_h || 1.5, 0), 300);
+  const cellM = Math.min(Math.max(+body.cell_m || 20, 10), 100);
+  const [o] = placePoints(M, [body.point]);
+  const lat0 = o.lat, lon0 = o.lon;
+  const mLat = 111132.92 - 559.82 * Math.cos(2 * lat0 * Math.PI / 180);
+  const mLon = 111412.84 * Math.cos(lat0 * Math.PI / 180);
+  const dLat = cellM / mLat, dLon = cellM / mLon;
+  const half = Math.ceil(radius / cellM), N = 2 * half + 1;
+  // local affine (east/north metres -> UTM) around the observer
+  const [ex, ey] = M.toXY(lon0 + 0.01, lat0), [nx, ny] = M.toXY(lon0, lat0 + 0.01);
+  const jEx = (ex - o.x) / (0.01 * mLon), jEy = (ey - o.y) / (0.01 * mLon);
+  const jNx = (nx - o.x) / (0.01 * mLat), jNy = (ny - o.y) / (0.01 * mLat);
+  const mask = new Uint8Array(N * N);
+  const STEP_V = 5;
+  const edge = [];
+  for (let k = 0; k < N; k++) edge.push([0, k], [N - 1, k], [k, 0], [k, N - 1]);
+  for (const [er, ec] of edge) {
+    const de = (ec - half) * cellM, dn = (half - er) * cellM;   // east/north metres to the edge cell
+    const len = Math.hypot(de, dn), ue = de / len, un = dn / len;
+    let maxSlope = -Infinity;
+    for (let d = STEP_V; d <= Math.min(len, radius); d += STEP_V) {
+      const e = ue * d, n = un * d;
+      const x = o.x + jEx * e + jNx * n, y = o.y + jEy * e + jNy * n;
+      if (!M.inside(x, y)) break;
+      const r = Math.round(half - n / cellM), c = Math.round(half + e / cellM);
+      const drop = d * d / (2 * R_EFF);
+      const s = M.surf(x, y) - drop;
+      const tSlope = (s + targetH - o.z) / d;
+      const i = r * N + c;
+      if (tSlope >= maxSlope) mask[i] = 2; else if (mask[i] === 0) mask[i] = 1;
+      if (d > 10) { const sl = (s - o.z) / d; if (sl > maxSlope) maxSlope = sl; }
+    }
+  }
+  let vis = 0, tot = 0;
+  for (let i = 0; i < mask.length; i++) { if (mask[i]) tot++; if (mask[i] === 2) vis++; }
+  return { mask, N, south: lat0 - (half + 0.5) * dLat, north: lat0 + (half + 0.5) * dLat,
+    west: lon0 - (half + 0.5) * dLon, east: lon0 + (half + 0.5) * dLon,
+    radius_m: radius, target_h: targetH, cell_m: cellM, observer: { name: o.name, lat: o.lat, lon: o.lon, antenna_asl: r1(o.z) },
+    visible_km2: r1(vis * cellM * cellM / 1e6), share: tot ? Math.round(vis / tot * 1000) / 10 : 0 };
+}
+
 /* ---------- data loading ---------- */
 async function gunzipMaybe(buf) {
   const u = new Uint8Array(buf);
@@ -330,8 +381,9 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
       else if (type === 'analyze') reply(true, analyze(M, body, p => self.postMessage({ type: 'progress', what: 'repeaters', p })));
       else if (type === 'profile') reply(true, profile(M, body));
       else if (type === 'elevation') reply(true, elevation(M, +body.lat, +body.lon));
+      else if (type === 'viewshed') { const v = viewshed(M, body); self.postMessage({ id, ok: true, data: v }, [v.mask.buffer]); }
       else throw new Error('unknown request ' + type);
     } catch (e) { reply(false, e.message || String(e)); }
   };
 }
-if (typeof module !== 'undefined') module.exports = { UTM, Model, analyze, profile, elevation, loadModel, gunzipMaybe, undelta, DEFAULTS };
+if (typeof module !== 'undefined') module.exports = { UTM, Model, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, DEFAULTS };

@@ -60,6 +60,7 @@
          display:flex; align-items:center; justify-content:center; font-weight:700; font-size:11px; box-shadow:0 1px 4px #0006; }
   .busy { position:fixed; inset:0; background:#fff6; display:none; align-items:center; justify-content:center; font-size:15px; z-index:2000; }
   .busy.on { display:flex; }
+  .vs-img { image-rendering: pixelated; }
   .busy .box { background:#fff; padding:16px 20px; border-radius:10px; box-shadow:0 2px 12px #0003; min-width:260px; text-align:center; }
   .bar { height:6px; background:#e3e6ea; border-radius:3px; margin-top:10px; overflow:hidden; }
   .bar div { height:100%; width:0; background:var(--accent); transition:width .2s; }
@@ -108,6 +109,17 @@
         <button id="clearpts">Clear all</button>
         <input type="file" id="file" accept=".csv,text/csv" hidden>
       </div>
+    </section>
+
+    <section>
+      <h2>Visibility map</h2>
+      <div class="hint" style="margin:0 0 6px">Shades everything a point can see directly (terrain + buildings), like HeyWhatsThat. Tip: press <b>👁</b> on a point or a repeater candidate.</div>
+      <label>From <select id="vsfrom" style="max-width:190px"></select></label>
+      <label>Radius <span class="row"><input type="number" id="vsrad" step="1" min="1" max="30"><span class="u">km</span></span></label>
+      <label>Target antenna above ground / roof <span class="row"><input type="number" id="vsth" step="0.5" min="0" max="300"><span class="u">m</span></span></label>
+      <div class="tools"><button id="vsrun" style="flex:1">Show visibility</button><button id="vshide">Hide</button></div>
+      <div id="vsinfo" class="hint"></div>
+      <div id="vserr" class="err"></div>
     </section>
 
     <section>
@@ -167,7 +179,6 @@ let bounds = null;
 const map = L.map('map', { zoomControl:true }).setView([50.45, 30.52], 11);
 const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom:19, attribution:'&copy; OpenStreetMap contributors' }).addTo(map);
 const sat = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom:19, attribution:'Imagery &copy; Esri' });
-L.control.layers({ "Map":osm, "Satellite":sat }).addTo(map);
 const linkLayer = L.layerGroup().addTo(map), repLayer = L.layerGroup().addTo(map), ptLayer = L.layerGroup().addTo(map);
 const legend = L.control({ position:'bottomleft' });
 legend.onAdd = () => { const d = L.DomUtil.create('div','legend');
@@ -232,14 +243,20 @@ function changed(keepResults) {
   renderList(); renderMarkers();
 }
 
+function renderFromSelect() {
+  const sel = $('vsfrom'), cur = sel.value;
+  sel.innerHTML = points.map(p => `<option value="p:${esc(p.name)}">${esc(p.name)}</option>`).join('') || '<option value="">(add a point first)</option>';
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
 function renderList() {
+  renderFromSelect();
   $('plist').innerHTML = points.map((p, i) => {
     const inf = p.info && p.info.inside ? `ground ${p.info.ground} m` + (p.info.building ? ` · building ${p.info.building} m${p.info.height_tagged ? '' : ' (est.)'}` : '') : '';
     const res = result && result.points.find(q => q.name === p.name);
     const asl = res ? ` · antenna at ${res.antenna_asl} m ASL` : '';
     return `<div class="pt ${i === selected ? 'sel' : ''}" data-i="${i}">
       <div class="top"><div class="dot">${i + 1}</div><input class="name" type="text" value="${esc(p.name)}" data-f="name">
-        <button class="x" data-del="${i}" title="Remove">✕</button></div>
+        <button class="x" data-eye="${i}" title="Show what this point can see">👁</button><button class="x" data-del="${i}" title="Remove">✕</button></div>
       <div class="mid"><input type="text" value="${p.lat}, ${p.lon}" data-f="ll" style="flex:1;min-width:0">
         <input class="h" type="number" step="0.5" min="0" max="500" value="${p.h}" data-f="h" title="Antenna height, m"><span class="u" style="color:#6b7480;font-size:11px">m</span>
         <label style="margin:0;gap:3px" title="Antenna is on the roof: height counts from the roof top"><input type="checkbox" data-f="roof" ${p.roof ? 'checked' : ''}>roof</label></div>
@@ -258,6 +275,7 @@ $('plist').addEventListener('change', e => {
 });
 $('plist').addEventListener('click', e => {
   if (e.target.dataset.del !== undefined) { points.splice(+e.target.dataset.del, 1); selected = -1; changed(); return; }
+  if (e.target.dataset.eye !== undefined) { const p = points[+e.target.dataset.eye]; $('vsfrom').value = 'p:' + p.name; runViewshed(); return; }
   const box = e.target.closest('.pt'); if (!box) return;
   selected = +box.dataset.i; renderMarkers();
   document.querySelectorAll('.pt').forEach((el, i) => el.classList.toggle('sel', i === selected));
@@ -300,9 +318,9 @@ $('file').onchange = async e => {
 };
 
 // ---------- settings ----------
-const settingIds = ['freq','txw','sens','gain','losses','defh','rep','rtxw','rgain','rmast','minroof','pad'];
+const settingIds = ['freq','txw','sens','gain','losses','defh','rep','rtxw','rgain','rmast','minroof','pad','vsrad','vsth'];
 function saveSettings() { const s = {}; settingIds.forEach(id => s[id] = $(id).type === 'checkbox' ? $(id).checked : $(id).value); store.set('rlos_settings', s); }
-settingIds.forEach(id => $(id).addEventListener('change', () => { saveSettings(); if (id !== 'defh') clearResults(); }));
+settingIds.forEach(id => $(id).addEventListener('change', () => { saveSettings(); if (!['defh','vsrad','vsth'].includes(id)) clearResults(); }));
 
 function params() {
   const n = id => { const v = parseFloat($(id).value); if (!isFinite(v)) throw new Error('Check the value of: ' + $(id).closest('label').firstChild.textContent.trim()); return v; };
@@ -325,7 +343,7 @@ worker.onmessage = ev => {
 };
 worker.onerror = e => { for (const p of pending.values()) p.reject(new Error('Engine error: ' + (e.message || 'unknown'))); pending.clear(); };
 function call(type, body) { return new Promise((resolve, reject) => { const id = ++reqId; pending.set(id, { resolve, reject }); worker.postMessage({ id, type, body }); }); }
-const ROUTES = { '/api/analyze': 'analyze', '/api/profile': 'profile', '/api/elevation': 'elevation' };
+const ROUTES = { '/api/analyze': 'analyze', '/api/profile': 'profile', '/api/elevation': 'elevation', '/api/viewshed': 'viewshed' };
 let ready = null;
 async function api(path, body) { await ready; return call(ROUTES[path], body); }
 function busy(on, text) { $('busy').classList.toggle('on', on); if (text) $('busytext').textContent = text; $('busybar').style.width = '0%'; }
@@ -368,9 +386,10 @@ function showResults() {
     .bindTooltip(`R${r.rank}: serves ${r.served}/${r.total}, worst ${r.worst} dB`).on('click', () => showRepeater(r)).addTo(repLayer));
   $('rtab').innerHTML = result.repeaters.map((r, k) => `<tr class="click" data-k="${k}"><td>R${r.rank}</td>
     <td>${r.type === 'rooftop' ? 'roof ' + r.building_m + ' m' : esc(r.type)}<br><span style="color:#6b7480">${r.lat}, ${r.lon}</span></td>
-    <td class="num">${r.served}/${r.total}</td><td class="num">${r.worst}</td><td><button data-add="${k}" title="Add as a point">+</button></td></tr>`).join('');
+    <td class="num">${r.served}/${r.total}</td><td class="num">${r.worst}</td><td style="white-space:nowrap"><button data-vs="${k}" title="Show what this site can see">👁</button> <button data-add="${k}" title="Add as a point">+</button></td></tr>`).join('');
   $('rtab').onclick = e => { const k = e.target.closest('tr')?.dataset.k; if (k === undefined) return; const r = result.repeaters[+k];
     if (e.target.dataset.add !== undefined) { addPoint(r.lat, r.lon, { name: 'R' + r.rank, h: +$('rmast').value, roof: r.type !== 'ground mast' }); return; }
+    if (e.target.dataset.vs !== undefined) { runViewshed({ name: 'R' + r.rank, lat: r.lat, lon: r.lon, h: result.prm.rep_mast, roof: r.type !== 'ground mast' }); return; }
     document.querySelectorAll('#ltab tr, #rtab tr').forEach(t => t.classList.toggle('active', t === e.target.closest('tr'))); showRepeater(r); };
   $('res').hidden = false; renderList();
   const ll = result.points.map(p => [p.lat, p.lon]).concat(result.repeaters.slice(0, 3).map(r => [r.lat, r.lon]));
@@ -386,6 +405,43 @@ function showRepeater(r) {
   map.fitBounds(L.latLngBounds([[r.lat, r.lon], ...result.points.map(p => [p.lat, p.lon])]).pad(0.15));
   L.popup().setLatLng([r.lat, r.lon]).setContent(`<b>Repeater candidate R${r.rank}</b><br>${esc(r.type)}${r.type === 'rooftop' ? ', building ' + r.building_m + ' m' : ''}<br>site ${r.site_asl} m ASL<br>serves ${r.served}/${r.total} with ≥ 10 dB · worst ${r.worst} dB<br><span style="color:#6b7480">${r.lat}, ${r.lon}</span>`).openOn(map);
 }
+
+// ---------- visibility map ----------
+const vsLayer = L.layerGroup().addTo(map);
+let vsBusy = false;
+async function runViewshed(src) {
+  $('vserr').textContent = '';
+  if (!src) {
+    const name = ($('vsfrom').value || '').slice(2), p = points.find(q => q.name === name);
+    if (!p) { $('vserr').textContent = 'Add a point first, then choose it here.'; return; }
+    src = { name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof };
+  }
+  const radius = Math.min(Math.max(parseFloat($('vsrad').value) || 10, 1), 30) * 1000;
+  const th = Math.min(Math.max(parseFloat($('vsth').value) || 0, 0), 300);
+  if (vsBusy) return; vsBusy = true; busy(true, `Calculating what ${src.name} can see…`);
+  try {
+    const v = await api('/api/viewshed', { point: src, radius_m: radius, target_h: th, cell_m: Math.max(10, Math.round(radius / 500)), params: {} });
+    drawViewshed(v, src);
+  } catch (e) { $('vserr').textContent = e.message; }
+  finally { vsBusy = false; busy(false); }
+}
+function drawViewshed(v, src) {
+  vsLayer.clearLayers();
+  const cv = document.createElement('canvas'); cv.width = v.N; cv.height = v.N;
+  const ctx = cv.getContext('2d'), img = ctx.createImageData(v.N, v.N), px = img.data;
+  for (let i = 0; i < v.mask.length; i++) if (v.mask[i] === 2) { px[i * 4] = 210; px[i * 4 + 1] = 25; px[i * 4 + 2] = 60; px[i * 4 + 3] = 140; }
+  ctx.putImageData(img, 0, 0);
+  L.imageOverlay(cv.toDataURL(), [[v.south, v.west], [v.north, v.east]], { opacity: 1, interactive: false, className: 'vs-img' }).addTo(vsLayer);
+  L.circle([v.observer.lat, v.observer.lon], { radius: v.radius_m, color: '#d2193c', weight: 1, fill: false, dashArray: '3 5', interactive: false }).addTo(vsLayer);
+  L.circleMarker([v.observer.lat, v.observer.lon], { radius: 6, color: '#fff', weight: 2, fillColor: '#d2193c', fillOpacity: 1 })
+    .bindTooltip(`${esc(v.observer.name)}: antenna at ${v.observer.antenna_asl} m ASL`).addTo(vsLayer);
+  $('vsinfo').innerHTML = `<b>${esc(v.observer.name)}</b> sees <b>${v.visible_km2} km²</b> (${v.share}% of the ${v.radius_m / 1000} km circle) at a target height of ${v.target_h} m. ` +
+    `Red = direct line of sight, each ${v.cell_m} m square visible at least in part. Radio can still work outside red (reflections, diffraction): use <b>Analyze</b> for link margins.`;
+  map.fitBounds([[v.south, v.west], [v.north, v.east]]);
+}
+$('vsrun').onclick = () => runViewshed();
+$('vshide').onclick = () => { vsLayer.clearLayers(); $('vsinfo').textContent = ''; };
+L.control.layers({ 'Map': osm, 'Satellite': sat }, { 'Visibility map': vsLayer, 'Links': linkLayer, 'Repeater candidates': repLayer }, { position: 'topright' }).addTo(map);
 
 // ---------- profile ----------
 async function openProfile(an, bn, rep) {
@@ -455,7 +511,7 @@ $('kml').onclick = () => { if (!result) return;
     bounds = info.bounds;
     L.rectangle(bounds, { color: '#1f6feb', weight: 1, fill: false, dashArray: '4 4', interactive: false }).addTo(map);
     const d = info.defaults, s = store.get('rlos_settings') || {};
-    const init = { freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
+    const init = { vsrad: 10, vsth: 1.5, freq: d.freq, txw: +dbm2w(d.tx_dbm).toFixed(1), sens: d.sens_dbm, gain: d.gain_tx, losses: d.losses, defh: 1.5,
                    rep: d.repeaters, rtxw: +dbm2w(d.rep_tx_dbm).toFixed(0), rgain: d.rep_gain, rmast: d.rep_mast, minroof: d.min_roof, pad: d.search_pad };
     settingIds.forEach(id => { const v = id in s ? s[id] : init[id]; if ($(id).type === 'checkbox') $(id).checked = !!v; else $(id).value = v; });
   } catch (e) { $('rerr').textContent = 'Could not load the model: ' + e.message; }

@@ -61,8 +61,8 @@ class Surface:
 
     def sample(self, arr, x, y):
         r, c = self.rc(x, y)
-        r = np.clip(np.round(r).astype(int), 0, arr.shape[0] - 1)
-        c = np.clip(np.round(c).astype(int), 0, arr.shape[1] - 1)
+        r = np.clip(np.floor(r).astype(int), 0, arr.shape[0] - 1)   # pixel containing the point
+        c = np.clip(np.floor(c).astype(int), 0, arr.shape[1] - 1)
         return arr[r, c]
 
     def inside(self, x, y):
