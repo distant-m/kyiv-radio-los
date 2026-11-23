@@ -12,10 +12,10 @@ const STEP = 5.0;
 
 const DEFAULTS = { freq: 446, tx_dbm: 37, sens_dbm: -118, gain_tx: 0, gain_rx: 0, losses: 3,
   repeaters: false, rep_tx_dbm: 44, rep_gain: 3, rep_mast: 3, min_roof: 25, serve_margin: 10,
-  search_pad: 2000, max_candidates: 600 };
+  search_pad: 2000, max_candidates: 600, wall_extra: 3, wall_er: 5, l_urban: 6.8 };
 const LIMITS = { freq: [30, 6000], tx_dbm: [-10, 60], sens_dbm: [-150, -60], gain_tx: [-10, 30], gain_rx: [-10, 30],
   losses: [0, 40], rep_tx_dbm: [0, 60], rep_gain: [-10, 30], rep_mast: [0, 100], min_roof: [0, 300],
-  serve_margin: [-20, 60], search_pad: [0, 10000], max_candidates: [10, 3000] };
+  serve_margin: [-20, 60], search_pad: [0, 10000], max_candidates: [10, 3000], wall_extra: [0, 30], wall_er: [1.5, 80], l_urban: [0, 20] };
 
 /* ---------- UTM (WGS84) via Krüger series, accurate to well below 1 mm in the zone ---------- */
 const UTM = (() => {
@@ -68,7 +68,7 @@ class Model {
     Object.assign(this, { meta, base });
     this.W = meta.width; this.H = meta.height; this.x0 = meta.x0; this.y0 = meta.y0; this.res = meta.res; this.zone = meta.utm_zone;
     this.TS = meta.tile; this.GF = meta.ground_factor; this.GT = meta.tile / meta.ground_factor + 2;
-    this.tiles = new Map(); this.clock = 0;
+    this.tiles = new Map(); this.clock = 0; this.walls = new Map();
     const c = [[0, this.H], [this.W, this.H], [this.W, 0], [0, 0]].map(([cc, rr]) => this.toLL(this.x0 + cc * this.res, this.y0 - rr * this.res));
     this.corners = c.map(([lon, lat]) => [lat, lon]);   // SW, SE, NE, NW
     this.bounds = [[Math.min(...c.map(p => p[1])), Math.min(...c.map(p => p[0]))], [Math.max(...c.map(p => p[1])), Math.max(...c.map(p => p[0]))]];
@@ -130,11 +130,47 @@ class Model {
     }
     return missing.length;
   }
+  /* building walls (for reflections): every tile whose walls could matter for the box */
+  async ensureWalls(box, onProgress) {
+    if (!this.meta.walls) return 0;
+    const c0 = Math.max(Math.floor(this.col(box[0]) / this.TS) - 1, 0), c1 = Math.min(Math.floor(this.col(box[2]) / this.TS) + 1, this.W / this.TS - 1);
+    const r0 = Math.max(Math.floor(this.row(box[3]) / this.TS) - 1, 0), r1 = Math.min(Math.floor(this.row(box[1]) / this.TS) + 1, this.H / this.TS - 1);
+    const missing = [];
+    for (let ty = r0; ty <= r1; ty++) for (let tx = c0; tx <= c1; tx++) { const k = `${tx}_${ty}`; if (k in this.meta.walls && !this.walls.has(k)) missing.push(k); }
+    const total = missing.reduce((s, k) => s + this.meta.walls[k], 0) || 1; let got = 0;
+    await Promise.all(missing.map(async k => {
+      const buf = await gunzipMaybe(await fetchBuf(this.base + `w_${k}.bin.gz`, n => { got += n; onProgress && onProgress(Math.min(got / total, 1)); }));
+      const [tx, ty] = k.split('_').map(Number);
+      this.walls.set(k, decodeWalls(buf, this.x0 + tx * this.TS * this.res, this.y0 - (ty + 1) * this.TS * this.res));
+    }));
+    return missing.length;
+  }
+  wallTilesIn(box) {
+    const out = [];
+    for (const [k, w] of this.walls) if (!(w.box[2] < box[0] || w.box[0] > box[2] || w.box[3] < box[1] || w.box[1] > box[3])) out.push(w);
+    return out;
+  }
   boxLL(list, padM) {   // UTM box around lat/lon points, padded by padM metres
     const xy = list.map(p => this.toXY(+p.lon, +p.lat));
     return [Math.min(...xy.map(q => q[0])) - padM, Math.min(...xy.map(q => q[1])) - padM,
             Math.max(...xy.map(q => q[0])) + padM, Math.max(...xy.map(q => q[1])) + padM];
   }
+}
+/* walls: Float64Array of segments [x1, y1, x2, y2] in UTM, outside to the right (CCW rings) */
+function decodeWalls(buf, ox, oy) {
+  const a = new Int16Array(buf), segs = [];
+  let i = 0, bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+  while (i < a.length) {
+    const n = a[i++]; let x = a[i++], y = a[i++];
+    const xs = [x], ys = [y];
+    for (let k = 1; k < n; k++) { x += a[i++]; y += a[i++]; xs.push(x); ys.push(y); }
+    for (let k = 0; k < n; k++) {
+      const x1 = ox + xs[k] / 2, y1 = oy + ys[k] / 2, x2 = ox + xs[(k + 1) % n] / 2, y2 = oy + ys[(k + 1) % n] / 2;
+      segs.push(x1, y1, x2, y2);
+      bx0 = Math.min(bx0, x1); by0 = Math.min(by0, y1); bx1 = Math.max(bx1, x1); by1 = Math.max(by1, y1);
+    }
+  }
+  return { segs: new Float64Array(segs), box: [bx0, by0, bx1, by1] };
 }
 function decodeTile(buf, TS, GT) {
   const nS = TS * TS, nG = GT * GT;
@@ -199,6 +235,89 @@ function link(M, a, b, freq, exR = 10) {
   return { dist_km: D / 1000, los: worst > 0, fresnel: worst, fspl, diff, loss, model, tagged, building };
 }
 
+/* ---------- single-bounce wall reflections ----------
+ * Every outer building wall is a flat mirror. For a pair a-b we mirror b in each wall's line,
+ * keep walls where the bounce point lies on the wall (inside its length, above ground, below
+ * the roof edge read from the surface model) and both points are in front of it.
+ * Path loss = free space over d1+d2 + diffraction on each leg (Deygout, as for direct links)
+ * + reflection loss: Fresnel coefficient for a vertical antenna on a dielectric wall
+ * (relative permittivity wall_er, 5 = concrete/brick) + a size penalty when the wall is smaller
+ * than the first Fresnel zone on it + wall_extra dB for windows, balconies and roughness.
+ */
+function wallLoss(cosI, er) {
+  const s2 = 1 - cosI * cosI, q = Math.sqrt(er - s2), g = Math.abs((cosI - q) / (cosI + q));
+  return -20 * Math.log10(Math.max(g, 1e-3));
+}
+function reflectionPaths(M, a, b, P, keep = 5) {
+  const lam = 299.792458 / P.freq, D = Math.hypot(b.x - a.x, b.y - a.y);
+  const excess = Math.min(Math.max(0.3 * D, 1000), 3000);
+  const semiMin = Math.sqrt(((D + excess) / 2) ** 2 - (D / 2) ** 2);
+  const box = [Math.min(a.x, b.x) - semiMin, Math.min(a.y, b.y) - semiMin, Math.max(a.x, b.x) + semiMin, Math.max(a.y, b.y) + semiMin];
+  const fs = d => 20 * Math.log10(Math.max(d, 1) / 1000) + 20 * Math.log10(P.freq) + 32.44;
+  const cands = [];
+  for (const w of M.wallTilesIn(box)) {
+    const S = w.segs;
+    for (let i = 0; i < S.length; i += 4) {
+      const x1 = S[i], y1 = S[i + 1], ex = S[i + 2] - x1, ey = S[i + 3] - y1, L = Math.hypot(ex, ey);
+      if (L < 6) continue;
+      const nx = ey / L, ny = -ex / L;                       // outward normal (CCW ring)
+      const sa = (a.x - x1) * nx + (a.y - y1) * ny, sb = (b.x - x1) * nx + (b.y - y1) * ny;
+      if (sa < 2 || sb < 2) continue;                        // both must be in front of the wall
+      const t = sa / (sa + sb);
+      const rx = a.x + (b.x - 2 * sb * nx - a.x) * t, ry = a.y + (b.y - 2 * sb * ny - a.y) * t;
+      const u = ((rx - x1) * ex + (ry - y1) * ey) / (L * L);
+      if (u < 0.05 || u > 0.95) continue;
+      const d1 = Math.hypot(rx - a.x, ry - a.y), d2 = Math.hypot(b.x - rx, b.y - ry);
+      if (d1 < 15 || d2 < 15 || d1 + d2 > D + excess) continue;
+      const cosI = Math.min(sa / d1, 1);
+      // Fresnel zone on the wall: radius r, stretched horizontally by 1/cos(incidence)
+      const r = Math.sqrt(lam * d1 * d2 / (d1 + d2));
+      const wFrac = Math.min(1, L * Math.min(u, 1 - u) * 2 * cosI / r);
+      const quick = fs(d1 + d2) + wallLoss(cosI, P.wall_er) - 20 * Math.log10(Math.max(wFrac, 0.05));
+      cands.push({ rx, ry, nx, ny, d1, d2, cosI, r, wFrac, quick, L });
+    }
+  }
+  cands.sort((p, q) => p.quick - q.quick);
+  const found = [];
+  for (const c of cands.slice(0, 250)) {
+    const zR = a.z + (b.z - a.z) * c.d1 / (c.d1 + c.d2);
+    const g = M.ground(c.rx, c.ry), top = M.surf(c.rx - c.nx * 2.5, c.ry - c.ny * 2.5);
+    if (zR < g + 1 || zR > top - 0.5) continue;              // bounce point must be on the wall face
+    const hFrac = Math.min(1, Math.min(zR - g, top - zR) * 2 / c.r);
+    const R = { x: c.rx + c.nx, y: c.ry + c.ny, z: zR };
+    const l1 = link(M, a, R, P.freq).diff, l2 = link(M, R, b, P.freq).diff;
+    const sizePen = Math.min(20, -20 * Math.log10(Math.max(c.wFrac * hFrac, 1e-2)));
+    const refl = wallLoss(c.cosI, P.wall_er) + sizePen + P.wall_extra;
+    const loss = fs(c.d1 + c.d2) + l1 + l2 + refl;
+    found.push({ loss, rx: c.rx, ry: c.ry, d1: c.d1, d2: c.d2, refl, diff: l1 + l2,
+      angle: Math.round(Math.acos(c.cosI) * 180 / Math.PI), wall_m: Math.round(c.L), height: Math.round(zR - g) });
+  }
+  found.sort((p, q) => p.loss - q.loss);
+  return { paths: found.slice(0, keep), candidates: cands.length, checked: Math.min(cands.length, 250) };
+}
+
+/* ---------- street-level multipath, statistical (ITU-R P.1411-12, section 4.3.1) ----------
+ * Site-general model for terminals near street level, built from measurements in cities:
+ *   L_NLoS(median) = 9.5 + 45 log10 f[MHz] + 40 log10(d[m]/1000) + L_urban
+ *   L_urban = 0 (suburban), 6.8 (urban), 2.3 (dense urban / high-rise); location spread sigma = 7 dB.
+ * ITU validity: 300-3000 MHz, d <= 3 km, antennas 1.9-3 m. Used here only if both antennas are
+ * <= 10 m above ground, the path crosses built-up area (>= 5 % of samples inside buildings)
+ * and d <= 5 km (3-5 km flagged as extrapolated). Returns null when it does not apply.
+ */
+function streetLoss(M, a, b, P) {
+  if (P.freq < 300 || P.freq > 3000) return null;
+  const D = Math.hypot(b.x - a.x, b.y - a.y);
+  if (D < 50 || D > 5000) return null;
+  const ha = a.z - M.ground(a.x, a.y), hb = b.z - M.ground(b.x, b.y);
+  if (ha > 10 || hb > 10) return null;
+  let inB = 0, n = 0;
+  for (let d = 10; d < D - 10; d += 20) { const t = d / D, x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t; n++; if (M.surf(x, y) - M.ground(x, y) > 2) inB++; }
+  if (!n || inB / n < 0.05) return null;
+  const fspl = 20 * Math.log10(D / 1000) + 20 * Math.log10(P.freq) + 32.44;
+  const L = 9.5 + 45 * Math.log10(P.freq) + 40 * Math.log10(D / 1000) + P.l_urban;
+  return { loss: Math.max(L, fspl), built_share: Math.round(inB / n * 100), extrapolated: D > 3000 };
+}
+
 const classify = m => m >= 20 ? 'good' : m >= 10 ? 'marginal' : m >= 0 ? 'weak' : 'no link';
 const r1 = v => Math.round(v * 10) / 10;
 
@@ -236,13 +355,32 @@ function placePoints(M, raw) {
   });
 }
 
-function computeLinks(M, pts, P) {
-  const budget = P.tx_dbm + P.gain_tx + P.gain_rx - P.losses, rows = [];
+function computeLinks(M, pts, P, withRefl, onProgress) {
+  const budget = P.tx_dbm + P.gain_tx + P.gain_rx - P.losses, rows = [], total = pts.length * (pts.length - 1) / 2;
   for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) {
-    const L = link(M, pts[i], pts[j], P.freq), rx = budget - L.loss, margin = rx - P.sens_dbm;
+    const L = link(M, pts[i], pts[j], P.freq);
+    let loss = L.loss, refl = null;
+    if (withRefl) {
+      const R = reflectionPaths(M, pts[i], pts[j], P);
+      // incoherent power sum of the direct path and the best reflected paths
+      const pw = [L.loss, ...R.paths.map(p => p.loss)].reduce((s, l) => s + Math.pow(10, -l / 10), 0);
+      const det = -10 * Math.log10(pw), st = streetLoss(M, pts[i], pts[j], P);
+      loss = st && st.loss < det ? st.loss : det;
+      refl = { found: R.paths.length, candidates: R.candidates, direct_margin: r1(budget - L.loss - P.sens_dbm),
+        gain_db: r1(L.loss - loss), walls_margin: r1(budget - det - P.sens_dbm), walls_gain: r1(L.loss - det),
+        street: st ? { margin: r1(budget - st.loss - P.sens_dbm), built_share: st.built_share, extrapolated: st.extrapolated } : null,
+        used: st && st.loss < det ? 'street' : (L.loss - det >= 0.5 ? 'walls' : 'direct'),
+        best: R.paths[0] ? (() => { const p = R.paths[0], [lon, lat] = M.toLL(p.rx, p.ry);
+          return { lat: Math.round(lat * 1e6) / 1e6, lon: Math.round(lon * 1e6) / 1e6, margin: r1(budget - p.loss - P.sens_dbm),
+            extra_m: Math.round(p.d1 + p.d2 - L.dist_km * 1000), refl_loss: r1(p.refl), diff: r1(p.diff), angle: p.angle, wall_m: p.wall_m, height: p.height }; })() : null,
+        others: R.paths.slice(1).map(p => { const [lon, lat] = M.toLL(p.rx, p.ry); return { lat, lon, margin: r1(budget - p.loss - P.sens_dbm) }; }) };
+      if (onProgress) onProgress(rows.length / total);
+    }
+    const rx = budget - loss, margin = rx - P.sens_dbm;
     rows.push({ a: pts[i].name, b: pts[j].name, dist_km: Math.round(L.dist_km * 100) / 100, los: L.los,
-      fresnel: Math.round(L.fresnel * 100) / 100, fspl: r1(L.fspl), diff: r1(L.diff), model: L.model,
-      rx_dbm: r1(rx), margin: r1(margin), status: classify(margin),
+      fresnel: Math.round(L.fresnel * 100) / 100, fspl: r1(L.fspl), diff: r1(L.diff),
+      model: !refl || refl.used === 'direct' ? L.model : refl.used === 'walls' ? L.model + ' + wall reflection' : 'street multipath (ITU-R P.1411)' + (refl.street.extrapolated ? ', extrapolated beyond 3 km' : ''),
+      rx_dbm: r1(rx), margin: r1(margin), status: classify(margin), refl,
       obstacle: L.building ? 'building' : 'terrain', obstacle_height: L.tagged ? 'tagged' : 'estimated' });
   }
   return rows;
@@ -302,7 +440,7 @@ function repeaterSearch(M, pts, P, onProgress, top = 15) {
 function analyze(M, body, onProgress) {
   const P = params(body.params), pts = placePoints(M, body.points || []);
   if (pts.length < 1) throw new Error('Add at least one point');
-  const links = pts.length >= 2 ? computeLinks(M, pts, P) : [];
+  const links = pts.length >= 2 ? computeLinks(M, pts, P, !!body.reflections, p => onProgress && onProgress(p, 'reflections')) : [];
   const repeaters = P.repeaters ? repeaterSearch(M, pts, P, onProgress) : [];
   return { points: pts.map(p => ({ name: p.name, lat: p.lat, lon: p.lon, h: p.h, roof: p.roof, base: r1(p.base), antenna_asl: r1(p.z) })),
     links, repeaters, params: P };
@@ -448,7 +586,17 @@ function needBox(M, type, body) {
   const P = (() => { try { return params(body.params); } catch (e) { return DEFAULTS; } })();
   if (type === 'elevation') return M.boxLL([body], 30);
   if (type === 'profile') return M.boxLL([body.a, body.b], 50);
-  if (type === 'analyze') return M.boxLL(body.points || [], 50 + (P.repeaters ? P.search_pad : 0));
+  if (type === 'analyze') {
+    let pad = 50 + (P.repeaters ? P.search_pad : 0);
+    if (body.reflections) {   // ellipses around every link (see reflectionPaths)
+      const xy = (body.points || []).map(p => M.toXY(+p.lon, +p.lat));
+      for (let i = 0; i < xy.length; i++) for (let j = i + 1; j < xy.length; j++) {
+        const D = Math.hypot(xy[i][0] - xy[j][0], xy[i][1] - xy[j][1]), e = Math.min(Math.max(0.3 * D, 1000), 3000);
+        pad = Math.max(pad, Math.sqrt(((D + e) / 2) ** 2 - (D / 2) ** 2) + 50);
+      }
+    }
+    return M.boxLL(body.points || [], pad);
+  }
   if (type === 'viewshed') return M.boxLL(body.points || [body.point], 50 + Math.min(Math.max(+body.radius_m || 10000, 500), 30000));
   return null;
 }
@@ -469,8 +617,9 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
         const pts = type === 'elevation' ? [body] : type === 'profile' ? [body.a, body.b] : (body.points || [body.point]);
         for (const p of pts) { const [x, y] = M.toXY(+p.lon, +p.lat); if (!M.inside(x, y)) throw new Error(`${p.name || 'Point'} is outside the map area of the surface model`); }
         await M.ensure(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
+        if (type === 'analyze' && body.reflections) await M.ensureWalls(box, p => self.postMessage({ type: 'progress', what: 'tiles', p }));
       }
-      if (type === 'analyze') reply(true, analyze(M, body, p => self.postMessage({ type: 'progress', what: 'repeaters', p })));
+      if (type === 'analyze') reply(true, analyze(M, body, (p, what) => self.postMessage({ type: 'progress', what: what || 'repeaters', p })));
       else if (type === 'profile') reply(true, profile(M, body));
       else if (type === 'elevation') reply(true, elevation(M, +body.lat, +body.lon));
       else if (type === 'viewshed') {
@@ -482,4 +631,4 @@ if (typeof self !== 'undefined' && typeof importScripts === 'function') {
   // one request at a time, so tile loading and eviction never interleave
   self.onmessage = ev => { chain = chain.then(() => handle(ev.data)); };
 }
-if (typeof module !== 'undefined') module.exports = { UTM, Model, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, decodeTile, needBox, DEFAULTS };
+if (typeof module !== 'undefined') module.exports = { UTM, Model, decodeWalls, reflectionPaths, wallLoss, streetLoss, analyze, profile, elevation, viewshed, placePoints, params, link, loadModel, gunzipMaybe, undelta, decodeTile, needBox, DEFAULTS };

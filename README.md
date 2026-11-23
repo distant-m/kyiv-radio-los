@@ -22,6 +22,13 @@ The online version also has a **visibility map** (like HeyWhatsThat's "visibilit
 
 A square is coloured only if all of it is visible. Checked against the per-link line-of-sight calculation: 96–99% agreement per point, and every sampled "seen by all" square was confirmed.
 
+**Analyze + reflections** (online version) also counts signals that don't travel in a straight line. Each link uses the best of three estimates:
+1. **Direct / over roofs:** as in plain Analyze.
+2. **Wall reflections:** single bounces off real building walls (OSM outlines, ~300,000 buildings). Each wall is a flat mirror. The bounce must land on the wall face, below the roof edge, and each leg gets the usual diffraction. Wall loss = Fresnel reflection of a vertical antenna on concrete/brick (about 8 dB head-on, 1–2 dB at glancing angles) + a size penalty when the wall is smaller than the first Fresnel zone on it + an adjustable extra loss for windows and balconies (default 3 dB). The direct path and the best 5 bounces are added as power. A winning wall is drawn as a bent line, with ○ on the wall.
+3. **Street multipath, statistical:** Recommendation ITU-R P.1411 section 4.3.1 (site-general model for terminals near street level, from measurements in cities): median loss = 9.5 + 45·log₁₀ f[MHz] + 40·log₁₀ d[km] + L_urban, where L_urban = 0 suburban / 6.8 urban / 2.3 dense urban; spread σ = 7 dB. Used only if both antennas are ≤ 10 m above ground, the path crosses built-up area, and d ≤ 5 km (3–5 km flagged as extrapolated; the ITU validity is 3 km). Drawn as a dotted line.
+
+This is a rough estimate (think ±10 dB). It handles a single bounce only, and treats all walls as the same material. The statistical part is a median, so in about one spot in ten the signal is ≥ 9 dB weaker.
+
 The online version (`docs/`) uses the same models as the Python version. On the test set its link margins agree within 0.5 dB for 90% of links, with the same link status and line-of-sight results, and the same top repeater sites.
 
 ## Quick start: run it on your own computer
