@@ -1,6 +1,6 @@
-data/
-out/
-results/
+/data/
+/out/
+/results/
 *.obf
 *.tif
 __pycache__/

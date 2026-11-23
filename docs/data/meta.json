@@ -1,0 +1,24 @@
+{
+ "crs": "EPSG:32636",
+ "utm_zone": 36,
+ "width": 4845,
+ "height": 4827,
+ "x0": 300180.0,
+ "y0": 5611320.0,
+ "res": 10.0,
+ "encoding": "int16 decimetres, row-wise delta, gzip",
+ "ground_factor": 3,
+ "ground_width": 1615,
+ "ground_height": 1609,
+ "scale": 0.1,
+ "files": {
+  "surface": "surface.i16.gz",
+  "ground": "ground30.i16.gz",
+  "tagged": "tagged.bits.gz"
+ },
+ "bytes": {
+  "surface": 9469666,
+  "ground": 1702381,
+  "tagged": 237759
+ }
+}
